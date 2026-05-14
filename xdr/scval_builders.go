@@ -20,7 +20,7 @@ import (
 // ScvAddress builds an ScVal carrying an ScAddress decoded from a strkey.
 // Accepts account (G...), contract (C...), and muxed-account (M...) strkeys.
 func ScvAddress(strkeyAddr string) (ScVal, error) {
-	addr, err := scAddressFromStrkey(strkeyAddr)
+	addr, err := ScAddressFromStrkey(strkeyAddr)
 	if err != nil {
 		return ScVal{}, err
 	}
@@ -129,9 +129,12 @@ func ScvMap(kv map[string]ScVal) (ScVal, error) {
 	return ScVal{Type: ScValTypeScvMap, Map: &pm}, nil
 }
 
-// scAddressFromStrkey converts a strkey (G..., C..., M...) into an
-// ScAddress. T0.2 will promote this to public ScAddressFromStrkey.
-func scAddressFromStrkey(s string) (ScAddress, error) {
+// ScAddressFromStrkey converts a strkey-encoded address into an ScAddress.
+// Accepts account (G...), contract (C...), and muxed-account (M...) strkeys;
+// any other version byte (e.g. seed S..., pre-auth-tx T..., signed-payload P...)
+// returns an error. Mirrors the symmetry of xdr.MustAddress / AddressToAccountId
+// for the ScAddress family.
+func ScAddressFromStrkey(s string) (ScAddress, error) {
 	if raw, err := strkey.Decode(strkey.VersionByteAccountID, s); err == nil {
 		var pub Uint256
 		copy(pub[:], raw)
@@ -175,6 +178,18 @@ func scAddressFromStrkey(s string) (ScAddress, error) {
 		}, nil
 	}
 	return ScAddress{}, fmt.Errorf("xdr: ScAddress: %q is not a G, C, or M strkey", s)
+}
+
+// MustScAddressFromStrkey is the panicking variant of ScAddressFromStrkey,
+// intended for test fixtures and contexts where the strkey is a compile-time
+// constant. Production code that handles user input should use the error-
+// returning form.
+func MustScAddressFromStrkey(s string) ScAddress {
+	addr, err := ScAddressFromStrkey(s)
+	if err != nil {
+		panic(err)
+	}
+	return addr
 }
 
 func validateScSymbol(s string) error {
