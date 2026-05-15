@@ -18,8 +18,8 @@ import (
 // transactions Client.Invoke builds are not — each Invoke returns a fresh
 // *AssembledTransaction the caller owns.
 //
-// Mirrors JS-SDK's contract.Client. Method-name validation is intentionally
-// minimal at this layer (T4.1); T4.3 will tighten it.
+// Mirrors JS-SDK's contract.Client. When a Spec is bound, Invoke rejects
+// unknown method names up front with "did you mean" suggestions (T4.3).
 type Client struct {
 	// ContractID is the strkey contract identifier (`C...`) this client
 	// targets.
@@ -127,8 +127,10 @@ func (c *Client) Spec() *Spec {
 //   - nil — treated as the empty argument list.
 //
 // When the client has a *Spec, Invoke validates that method exists before any
-// network call. Tighter validation (signature arity, type compatibility)
-// lands in T4.3.
+// network call. Unknown names return an *Error with KindInvalidArgs whose
+// message includes "did you mean: …" suggestions from the spec when a near
+// match exists (T4.3). Signature-level validation (arity, type compatibility)
+// stays the responsibility of Spec.FuncArgsToScVals.
 //
 // Invoke requires a source account (WithSource) and base fee (defaulted to
 // MinBaseFee). InvokeOption is reserved for T4.4; passing options here is a
@@ -149,7 +151,7 @@ func (c *Client) Invoke(
 		return nil, invalidArgsf("Invoke: no source account; pass WithSource")
 	}
 	if c.spec != nil && !c.spec.HasFunc(method) {
-		return nil, invalidArgsf("Invoke: function %q not found in spec", method)
+		return nil, unknownMethodError(c.spec, method)
 	}
 
 	scArgs, err := c.marshalArgs(method, args)
