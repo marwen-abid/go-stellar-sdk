@@ -4,9 +4,9 @@
 // integration tests need: an *rpcclient.Client, the network passphrase, and
 // a place to hang a pre-funded root keypair.
 //
-// T7.1 — design §4.12 foundation. Funding via friendbot (Sandbox.Fund) and
-// retrofitting existing integration tests onto Sandbox are deferred to T7.2
-// and T7.3 respectively.
+// T7.1 — design §4.12 foundation. T7.2 layered friendbot funding on top
+// (Sandbox.Fund and Sandbox.NewFundedKeypair). T7.3 (retrofitting existing
+// integration tests onto Sandbox) is still pending.
 //
 // Gating: tests that need a live endpoint should call Require(t), which skips
 // unless the STELLAR_NETWORK_SANDBOX env var is set. Default `go test ./...`
@@ -52,8 +52,14 @@ type Sandbox struct {
 	// RPCURL is the URL of the Soroban RPC endpoint.
 	RPCURL string
 
-	// Funded is the pre-funded root account. Populated by T7.2 (Sandbox.Fund);
-	// reserved here so the struct shape is stable across phases.
+	// FriendbotURL is the base URL of the friendbot endpoint used by Fund. If
+	// empty, Start auto-discovers it from the RPC server's getNetwork response
+	// (which returns the network's friendbot URL on testnet/futurenet/local
+	// quickstart). Set via WithFriendbotURL when discovery is not desired.
+	FriendbotURL string
+
+	// Funded is a convenience slot for a pre-funded root account. NewFundedKeypair
+	// populates it on first call; callers can also assign it themselves.
 	Funded *keypair.Full
 }
 
@@ -70,6 +76,12 @@ func WithRPCURL(url string) Option {
 // WithRPCURL when targeting testnet/futurenet.
 func WithNetworkPassphrase(passphrase string) Option {
 	return func(s *Sandbox) { s.Network = passphrase }
+}
+
+// WithFriendbotURL overrides the friendbot base URL used by Sandbox.Fund.
+// When unset, Start auto-discovers it via RPC.GetNetwork.
+func WithFriendbotURL(url string) Option {
+	return func(s *Sandbox) { s.FriendbotURL = url }
 }
 
 // New returns a Sandbox configured for a local quickstart container by
@@ -102,6 +114,15 @@ func (s *Sandbox) Start(ctx context.Context) error {
 	}
 	if _, err := s.RPC.GetHealth(ctx); err != nil {
 		return err
+	}
+	if s.FriendbotURL == "" {
+		// Best-effort discovery: getNetwork advertises the network's friendbot
+		// URL on testnet/futurenet/local quickstart. A missing or empty value
+		// is not fatal — Fund will surface a clear error if it is invoked
+		// without a configured URL.
+		if net, err := s.RPC.GetNetwork(ctx); err == nil {
+			s.FriendbotURL = net.FriendbotURL
+		}
 	}
 	return nil
 }
