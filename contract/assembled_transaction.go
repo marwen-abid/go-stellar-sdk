@@ -91,6 +91,14 @@ type AssembledTransaction struct {
 	// sent caches the result of a successful Send so subsequent Send calls
 	// are no-ops (JS parity: AssembledTransaction.send is idempotent).
 	sent *SentTransaction
+
+	// classicSubmit, when non-nil, marks this AssembledTransaction as a
+	// classic (non-Soroban) one returned by NewClassicAssembledTransaction.
+	// SignAndSend delegates to this hook instead of running the Soroban
+	// SignAuthEntries → Sign → Send pipeline. Simulate / Send / Sign /
+	// Result / IsReadCall return ErrInvalidArgs when this field is set
+	// because those steps are Soroban-only.
+	classicSubmit ClassicSubmitFunc
 }
 
 // AssembleParams configures a new AssembledTransaction. SourceAccount must

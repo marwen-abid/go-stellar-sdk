@@ -44,7 +44,21 @@ import (
 // read/write boundaries — if the first call short-circuited as a read, the
 // AT has no cached send.
 func (a *AssembledTransaction) SignAndSend(ctx context.Context, signer Signer) (*SentTransaction, error) {
-	if a == nil || a.rpc == nil {
+	if a == nil {
+		return nil, invalidArgsf("AssembledTransaction not initialized")
+	}
+	if ctx == nil {
+		return nil, invalidArgsf("SignAndSend: ctx is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// Classic Payment fast path: delegate to the caller-supplied submitter
+	// and skip the Soroban Simulate/Sign/Send pipeline entirely.
+	if a.classicSubmit != nil {
+		return a.signAndSendClassic(ctx, signer)
+	}
+	if a.rpc == nil {
 		return nil, invalidArgsf("AssembledTransaction not initialized")
 	}
 	if a.Simulation == nil {
@@ -52,12 +66,6 @@ func (a *AssembledTransaction) SignAndSend(ctx context.Context, signer Signer) (
 	}
 	if signer == nil {
 		return nil, invalidArgsf("SignAndSend: signer is nil")
-	}
-	if ctx == nil {
-		return nil, invalidArgsf("SignAndSend: ctx is nil")
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
 	}
 
 	// Read calls have nothing to submit; Result() reads from a.ReturnValue.

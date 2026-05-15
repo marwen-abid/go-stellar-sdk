@@ -43,6 +43,11 @@ type SentTransaction struct {
 	method  string
 	spec    *Spec
 	getResp *protocol.GetTransactionResponse
+	// classic marks a SentTransaction returned by the classic Payment fast
+	// path (see contract.ClassicSubmitFunc). Classic submitters confirm
+	// inclusion synchronously, so Wait short-circuits to an immediate
+	// success rather than polling Stellar RPC.
+	classic bool
 }
 
 // pollConfig captures the knobs exposed by the PollOption functional options.
@@ -110,7 +115,17 @@ type StatusUpdate struct {
 // status string (one of protocol.TransactionStatusSuccess / TransactionStatusFailed
 // / TransactionStatusNotFound). It does not retry.
 func (s *SentTransaction) Status(ctx context.Context) (string, error) {
-	if s == nil || s.rpc == nil {
+	if s == nil {
+		return "", invalidArgsf("SentTransaction not initialized")
+	}
+	if s.classic {
+		// Classic submitters confirm inclusion synchronously; the
+		// SentTransaction handed back already represents a finalized
+		// transaction. Surface that as the canonical SUCCESS status so
+		// callers can poll uniformly.
+		return protocol.TransactionStatusSuccess, nil
+	}
+	if s.rpc == nil {
 		return "", invalidArgsf("SentTransaction not initialized")
 	}
 	resp, err := s.rpc.GetTransaction(ctx, protocol.GetTransactionRequest{
@@ -140,7 +155,23 @@ func (s *SentTransaction) Status(ctx context.Context) (string, error) {
 // Native decoding of the result ScVal is the job of T3.6's Result() helper;
 // callers can read the raw scval via Response.ReturnValueXDR.
 func (s *SentTransaction) Wait(ctx context.Context, opts ...PollOption) (*protocol.GetTransactionResponse, error) {
-	if s == nil || s.rpc == nil {
+	if s == nil {
+		return nil, invalidArgsf("SentTransaction not initialized")
+	}
+	if s.classic {
+		// Classic transactions are already finalized when their hash is
+		// returned from the submitter; synthesize a minimal success
+		// response so callers can drive Wait → (anything-they-need) in
+		// the same shape as the Soroban path.
+		resp := &protocol.GetTransactionResponse{
+			TransactionDetails: protocol.TransactionDetails{
+				Status: protocol.TransactionStatusSuccess,
+			},
+		}
+		s.getResp = resp
+		return resp, nil
+	}
+	if s.rpc == nil {
 		return nil, invalidArgsf("SentTransaction not initialized")
 	}
 

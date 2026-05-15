@@ -1,6 +1,7 @@
 package asset
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -8,8 +9,33 @@ import (
 	"github.com/stellar/go-stellar-sdk/clients/rpcclient"
 	"github.com/stellar/go-stellar-sdk/contract"
 	"github.com/stellar/go-stellar-sdk/strkey"
+	"github.com/stellar/go-stellar-sdk/txnbuild"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
+
+// ClassicSubmitter is the seam through which Token.Transfer submits classic
+// (non-Soroban) transactions when the JS-SDK-equivalent "prefer Payment"
+// fast path applies (both endpoints are G/M accounts AND the Token wraps a
+// classic asset). Keeping it as an interface lets callers BYO submission
+// transport — Horizon, an in-house relay, an in-memory test fake — without
+// the asset package taking a hard dependency on clients/horizonclient.
+//
+// Implementations are expected to sign the transaction using the provided
+// Signer (if non-nil), submit it, and return the on-chain hash. The hash
+// is wrapped into a *contract.SentTransaction whose Wait short-circuits to
+// success, because classic submitters confirm inclusion synchronously.
+type ClassicSubmitter interface {
+	SubmitClassic(ctx context.Context, tx *txnbuild.Transaction, signer contract.Signer) (xdr.Hash, error)
+}
+
+// AccountLoader resolves the live sequence number for a Stellar account.
+// Token.Transfer uses it to populate the Source account when dispatching
+// the classic Payment fast path. Mirrors the JS SDK's
+// `AccountResponse`-shaped expectation but kept narrow so callers can wire
+// in Horizon, RPC, or a custom cache without pulling in those packages.
+type AccountLoader interface {
+	LoadAccount(ctx context.Context, addr string) (txnbuild.Account, error)
+}
 
 // ErrInvalidToken is returned by Token constructors when their arguments fail
 // pre-flight validation (missing required option, malformed contract id,
@@ -75,16 +101,33 @@ type Token struct {
 	// caller-supplied (or fall back to SACSpec() since most SEP-41 tokens
 	// share that surface).
 	spec *contract.Spec
+
+	// classicSubmitter is the caller-supplied classic-transaction submission
+	// hook. When set on a Token wrapping a classic asset, Transfer auto-
+	// routes G/M→G/M dispatches through a txnbuild.Payment op (faster /
+	// cheaper than the SAC `transfer` invocation). When nil, Transfer
+	// falls back to the SAC path even when both endpoints are accounts —
+	// preserving the pre-T5.3.1 behavior for callers that never opt in.
+	classicSubmitter ClassicSubmitter
+	// accountLoader resolves sequence numbers for the classic Payment
+	// fast path. Required when classicSubmitter is set.
+	accountLoader AccountLoader
+	// baseFee overrides the per-op base fee for classic transactions. Zero
+	// falls back to txnbuild.MinBaseFee.
+	classicBaseFee int64
 }
 
 // tokenConfig accumulates Option mutations before Token construction.
 type tokenConfig struct {
-	rpc     *rpcclient.Client
-	horizon *horizonclient.Client
-	network string
-	source  string
-	signer  contract.Signer
-	spec    *contract.Spec
+	rpc              *rpcclient.Client
+	horizon          *horizonclient.Client
+	network          string
+	source           string
+	signer           contract.Signer
+	spec             *contract.Spec
+	classicSubmitter ClassicSubmitter
+	accountLoader    AccountLoader
+	classicBaseFee   int64
 }
 
 // Option is the functional-option type accepted by New / NewFromContractID.
@@ -131,6 +174,31 @@ func WithSpec(s *contract.Spec) Option {
 	return func(c *tokenConfig) { c.spec = s }
 }
 
+// WithClassicSubmitter installs the classic-Payment submission hook. When
+// present on a Token wrapping a classic asset, Transfer dispatches G/M→G/M
+// payments through a txnbuild.Payment op + this submitter instead of the
+// SAC `transfer` invocation. Without this option (or without an
+// AccountLoader) Transfer continues to route the SAC path for every
+// dispatch, matching the T5.3 baseline.
+func WithClassicSubmitter(s ClassicSubmitter) Option {
+	return func(c *tokenConfig) { c.classicSubmitter = s }
+}
+
+// WithAccountLoader installs the AccountLoader the classic Payment fast
+// path uses to fetch sequence numbers for the source account. Required
+// alongside WithClassicSubmitter; when either is missing the classic path
+// is disabled and Transfer falls back to the SAC `transfer` invocation.
+func WithAccountLoader(a AccountLoader) Option {
+	return func(c *tokenConfig) { c.accountLoader = a }
+}
+
+// WithClassicBaseFee overrides the per-op base fee used when building
+// classic-Payment transactions. Zero or negative values fall back to
+// txnbuild.MinBaseFee. Has no effect on the SAC path.
+func WithClassicBaseFee(fee int64) Option {
+	return func(c *tokenConfig) { c.classicBaseFee = fee }
+}
+
 // New constructs a Token from a classic asset, auto-deriving its Stellar
 // Asset Contract id from the asset + network. The returned Token can
 // dispatch both classic Payment and SAC transfer paths once T5.3 lands.
@@ -149,15 +217,18 @@ func New(a xdr.Asset, opts ...Option) (*Token, error) {
 	}
 
 	tok := &Token{
-		Asset:      a,
-		ContractID: contractID,
-		classic:    true,
-		network:    cfg.network,
-		rpc:        cfg.rpc,
-		horizon:    cfg.horizon,
-		source:     cfg.source,
-		signer:     cfg.signer,
-		spec:       cfg.specOrDefault(),
+		Asset:            a,
+		ContractID:       contractID,
+		classic:          true,
+		network:          cfg.network,
+		rpc:              cfg.rpc,
+		horizon:          cfg.horizon,
+		source:           cfg.source,
+		signer:           cfg.signer,
+		spec:             cfg.specOrDefault(),
+		classicSubmitter: cfg.classicSubmitter,
+		accountLoader:    cfg.accountLoader,
+		classicBaseFee:   cfg.classicBaseFee,
 	}
 	tok.client = tok.buildClient()
 	return tok, nil
@@ -179,14 +250,17 @@ func NewFromContractID(contractID string, opts ...Option) (*Token, error) {
 	}
 
 	tok := &Token{
-		ContractID: contractID,
-		classic:    false,
-		network:    cfg.network,
-		rpc:        cfg.rpc,
-		horizon:    cfg.horizon,
-		source:     cfg.source,
-		signer:     cfg.signer,
-		spec:       cfg.specOrDefault(),
+		ContractID:       contractID,
+		classic:          false,
+		network:          cfg.network,
+		rpc:              cfg.rpc,
+		horizon:          cfg.horizon,
+		source:           cfg.source,
+		signer:           cfg.signer,
+		spec:             cfg.specOrDefault(),
+		classicSubmitter: cfg.classicSubmitter,
+		accountLoader:    cfg.accountLoader,
+		classicBaseFee:   cfg.classicBaseFee,
 	}
 	tok.client = tok.buildClient()
 	return tok, nil
