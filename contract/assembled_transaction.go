@@ -3,6 +3,7 @@ package contract
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 
@@ -275,9 +276,25 @@ func (a *AssembledTransaction) Send(ctx context.Context) (*SentTransaction, erro
 // On RPC transport failure Simulate returns an *Error wrapping
 // ErrSimulationFailed with the underlying error attached. If the response
 // carries a non-empty Error field, the same sentinel is returned with the
-// server-supplied message as Details. If the response carries a non-nil
-// RestorePreamble (archived footprint entries), Simulate returns an *Error
-// matching ErrRestoreRequired; the automatic restore path lives in T3.2.
+// server-supplied message as Details.
+//
+// When the response carries a non-nil RestorePreamble (archived footprint
+// entries) and the AssembledTransaction has auto-restore enabled (via the
+// Restore(true) InvokeOption — the default for Client.Invoke) AND a Signer
+// configured, Simulate transparently:
+//
+//  1. Builds the RestoreFootprint transaction via BuildRestoreTransaction.
+//  2. Signs it with the AT's Signer.
+//  3. Submits it via the RPC client.
+//  4. Waits for the restore tx to reach a terminal status.
+//  5. Re-runs simulation on the original invocation.
+//
+// Re-simulation is capped at one retry; if simulation reports archived
+// footprint entries a second time, Simulate returns an *Error matching
+// ErrRestoreRequired with a "loop detected" detail. If auto-restore is
+// disabled (Restore(false)) or no Signer is configured, the original
+// ErrRestoreRequired is surfaced unchanged so the caller can drive the
+// restore flow manually.
 //
 // Simulate is idempotent: calling it again replays the request and
 // overwrites the simulation-derived fields.
@@ -286,6 +303,39 @@ func (a *AssembledTransaction) Simulate(ctx context.Context) error {
 		return invalidArgsf("AssembledTransaction not initialized")
 	}
 
+	err := a.simulateOnce(ctx)
+	if err == nil || !errors.Is(err, ErrRestoreRequired) {
+		return err
+	}
+
+	// Auto-restore only fires when the caller opted in AND supplied a
+	// Signer the AT can use to sign the restore tx. Otherwise we surface
+	// the original ErrRestoreRequired so the caller drives restore manually.
+	if !a.restoreEnabled || a.signer == nil {
+		return err
+	}
+
+	if rerr := a.runAutoRestore(ctx); rerr != nil {
+		return rerr
+	}
+
+	// Re-simulate the original invocation once. A second ErrRestoreRequired
+	// means restore didn't actually resolve the archived footprint; we cap
+	// the retry to avoid an infinite loop.
+	err = a.simulateOnce(ctx)
+	if err != nil && errors.Is(err, ErrRestoreRequired) {
+		return &Error{
+			Kind:    KindRestoreRequired,
+			Details: "auto-restore loop detected: re-simulation still reports archived entries",
+		}
+	}
+	return err
+}
+
+// simulateOnce performs a single simulate round-trip and folds the response
+// into the AT. It is the body that Simulate wraps with the auto-restore
+// retry; calling it directly skips auto-restore.
+func (a *AssembledTransaction) simulateOnce(ctx context.Context) error {
 	envelopeB64, err := a.Built.Base64()
 	if err != nil {
 		return fmt.Errorf("contract: encode tx for simulate: %w", err)
@@ -344,6 +394,78 @@ func (a *AssembledTransaction) Simulate(ctx context.Context) error {
 	a.Simulation = &resp
 	a.AuthEntries = authEntries
 	a.ReturnValue = returnValue
+	// Clear any stale preamble from a prior failed simulate so re-running
+	// against a freshly-restored ledger does not leave a misleading pointer.
+	a.RestorePreamble = nil
+	return nil
+}
+
+// runAutoRestore builds, signs, submits, and waits for the
+// RestoreFootprint transaction implied by the RestorePreamble from the most
+// recent simulate. The preamble is consumed (cleared) on success so a
+// follow-up simulate does not falsely advertise a still-archived footprint.
+// Errors are wrapped as *Error with the appropriate Kind so callers can
+// classify them with errors.Is.
+func (a *AssembledTransaction) runAutoRestore(ctx context.Context) error {
+	restoreTx, err := a.BuildRestoreTransaction()
+	if err != nil {
+		return err
+	}
+
+	signed, err := a.signer.SignTransaction(a.network, restoreTx)
+	if err != nil {
+		return &Error{Kind: KindSubmissionFailed, Details: "auto-restore: sign", cause: err}
+	}
+	if signed == nil {
+		return &Error{Kind: KindSubmissionFailed, Details: "auto-restore: signer returned nil transaction"}
+	}
+
+	envelopeB64, err := signed.Base64()
+	if err != nil {
+		return &Error{Kind: KindSubmissionFailed, Details: "auto-restore: encode envelope", cause: err}
+	}
+
+	resp, err := a.rpc.SendTransaction(ctx, protocol.SendTransactionRequest{
+		Transaction: envelopeB64,
+	})
+	if err != nil {
+		return &Error{Kind: KindSubmissionFailed, Details: "auto-restore: send", cause: err}
+	}
+	switch resp.Status {
+	case stellarcore.TXStatusPending, stellarcore.TXStatusDuplicate:
+		// fall through.
+	case stellarcore.TXStatusError, stellarcore.TXStatusTryAgainLater:
+		return &Error{
+			Kind:    KindSubmissionFailed,
+			Details: fmt.Sprintf("auto-restore: RPC returned %s", resp.Status),
+		}
+	default:
+		return &Error{
+			Kind:    KindSubmissionFailed,
+			Details: fmt.Sprintf("auto-restore: unrecognized status %q", resp.Status),
+		}
+	}
+
+	hash, err := decodeHexHash(resp.Hash)
+	if err != nil {
+		return &Error{Kind: KindSubmissionFailed, Details: "auto-restore: decode response hash", cause: err}
+	}
+
+	// Reuse SentTransaction.Wait for poll semantics; default poll config is
+	// sufficient — restore txs are tiny and confirm in 1-2 ledgers.
+	sent := &SentTransaction{
+		Hash:         hash,
+		SendResponse: &resp,
+		rpc:          a.rpc,
+	}
+	if _, err := sent.Wait(ctx); err != nil {
+		return err
+	}
+
+	// Restore consumed the preamble; clear it so the re-simulate path
+	// doesn't trip the "no preamble" branch in BuildRestoreTransaction if
+	// the caller re-enters this code path.
+	a.RestorePreamble = nil
 	return nil
 }
 

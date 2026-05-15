@@ -462,10 +462,11 @@ func AdditionalAuth(es ...xdr.SorobanAuthorizationEntry) InvokeOption {
 }
 
 // Restore toggles the automatic-restore behavior. The default is true:
-// when simulation surfaces an archived footprint, Invoke would
-// transparently submit a RestoreFootprint transaction first. The
-// auto-submission path itself is wired in a later task; Restore today
-// records the caller's preference on the resulting AssembledTransaction.
+// when simulation surfaces an archived footprint and the AT has a Signer
+// configured, Simulate transparently builds, signs, submits, and waits for
+// a RestoreFootprint transaction, then re-simulates the original
+// invocation (capped at one retry). Setting enable=false (or omitting a
+// Signer) surfaces ErrRestoreRequired so the caller can drive restore.
 func Restore(enable bool) InvokeOption {
 	return func(c *invokeConfig) {
 		c.restoreSet = true
