@@ -1,4 +1,4 @@
-package contractevents
+package events
 
 import (
 	"github.com/stellar/go-stellar-sdk/support/errors"
