@@ -167,6 +167,69 @@ func TestAssembledTransaction_Send_RequiresSignedEnvelope(t *testing.T) {
 	assert.Equal(t, 0, rpc.sendCalls)
 }
 
+// MaxFee cap ----------------------------------------------------------
+
+func TestAssembledTransaction_Send_MaxFeeZeroIsUncapped(t *testing.T) {
+	rpc := &fakeSimulator{}
+	at := primeSimulated(t, rpc, false)
+	// Default: maxFee == 0 → no check, even though Built.MaxFee() > 0.
+	require.Zero(t, at.maxFee)
+	require.Positive(t, at.Built.MaxFee())
+
+	rpc.sendResp = protocol.SendTransactionResponse{
+		Status: stellarcore.TXStatusPending,
+		Hash:   strings.Repeat("aa", 32),
+	}
+
+	_, err := at.Send(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, rpc.sendCalls)
+}
+
+func TestAssembledTransaction_Send_MaxFeeAboveEffectiveProceeds(t *testing.T) {
+	rpc := &fakeSimulator{}
+	at := primeSimulated(t, rpc, false)
+	at.maxFee = at.Built.MaxFee() + 1
+
+	rpc.sendResp = protocol.SendTransactionResponse{
+		Status: stellarcore.TXStatusPending,
+		Hash:   strings.Repeat("bb", 32),
+	}
+
+	_, err := at.Send(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, rpc.sendCalls)
+}
+
+func TestAssembledTransaction_Send_MaxFeeEqualToEffectiveProceeds(t *testing.T) {
+	rpc := &fakeSimulator{}
+	at := primeSimulated(t, rpc, false)
+	at.maxFee = at.Built.MaxFee()
+
+	rpc.sendResp = protocol.SendTransactionResponse{
+		Status: stellarcore.TXStatusPending,
+		Hash:   strings.Repeat("cc", 32),
+	}
+
+	_, err := at.Send(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, rpc.sendCalls)
+}
+
+func TestAssembledTransaction_Send_MaxFeeBelowEffectiveRejects(t *testing.T) {
+	rpc := &fakeSimulator{}
+	at := primeSimulated(t, rpc, false)
+	effective := at.Built.MaxFee()
+	at.maxFee = effective - 1
+
+	_, err := at.Send(context.Background())
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrSubmissionFailed), "want ErrSubmissionFailed, got %v", err)
+	assert.Contains(t, err.Error(), "MaxFee")
+	assert.Equal(t, 0, rpc.sendCalls, "Send must not hit the RPC when the cap is exceeded")
+	assert.Nil(t, at.sent, "rejected Send should not cache a SentTransaction")
+}
+
 // idempotency ---------------------------------------------------------
 
 func TestAssembledTransaction_Send_IsIdempotent(t *testing.T) {

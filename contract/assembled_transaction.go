@@ -210,6 +210,20 @@ func (a *AssembledTransaction) Send(ctx context.Context) (*SentTransaction, erro
 	if len(a.Built.Signatures()) == 0 {
 		return nil, &Error{Kind: KindSubmissionFailed, Details: "Send: envelope is unsigned; call Sign first"}
 	}
+	// Enforce the MaxFee cap. txnbuild.Transaction.MaxFee() returns the
+	// envelope's total fee (BaseFee * #ops + Soroban resource fee), which
+	// matches the inclusion+resource sum MaxFee documents itself to bound.
+	// A zero cap means "uncapped" and preserves pre-cap behavior; we fail
+	// the check only when the effective fee strictly exceeds the cap so
+	// MaxFee == effective remains a successful send.
+	if a.maxFee > 0 {
+		if effective := a.Built.MaxFee(); effective > a.maxFee {
+			return nil, &Error{
+				Kind:    KindSubmissionFailed,
+				Details: fmt.Sprintf("Send: effective fee %d exceeds MaxFee cap %d", effective, a.maxFee),
+			}
+		}
+	}
 
 	envelopeB64, err := a.Built.Base64()
 	if err != nil {
