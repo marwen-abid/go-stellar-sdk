@@ -52,6 +52,12 @@ type AssembledTransaction struct {
 	// calls can use this directly without submitting). Nil until Simulate
 	// has run and returned at least one result.
 	ReturnValue *xdr.ScVal
+	// RestorePreamble is the RestoreFootprint footprint surfaced by
+	// simulation when one or more ledger entries in the invocation's
+	// footprint are archived. Non-nil only when Simulate returned an *Error
+	// matching ErrRestoreRequired; consumed by BuildRestoreTransaction to
+	// construct the recovery operation.
+	RestorePreamble *protocol.RestorePreamble
 
 	// unexported state held across the lifecycle.
 	rpc                   rpcSimulator
@@ -186,6 +192,10 @@ func (a *AssembledTransaction) Simulate(ctx context.Context) error {
 		return &Error{Kind: KindSimulationFailed, Details: resp.Error}
 	}
 	if resp.RestorePreamble != nil {
+		// Stash the preamble so BuildRestoreTransaction can consume it; the
+		// caller still receives ErrRestoreRequired and must drive the restore
+		// flow before re-simulating.
+		a.RestorePreamble = resp.RestorePreamble
 		return &Error{Kind: KindRestoreRequired, Details: "simulation reported archived footprint entries"}
 	}
 
