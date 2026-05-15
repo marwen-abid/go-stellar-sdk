@@ -75,6 +75,17 @@ type AssembledTransaction struct {
 	preconditions         txnbuild.Preconditions
 	resourceFeeMultiplier float64
 	spec                  *Spec
+	// signer is the per-AssembledTransaction default Signer plumbed from a
+	// client-level WithSigner or per-call WithInvokeSigner. SignAndSend
+	// continues to accept an explicit signer argument; when callers route
+	// through InvokeAndConfirm this field is consulted only as a fallback.
+	signer Signer
+	// maxFee caps the total transaction fee in stroops. Zero means uncapped.
+	maxFee int64
+	// restoreEnabled records the caller's auto-restore preference. The
+	// transparent restore-and-retry flow lands in a follow-up; today this
+	// flag is read by callers who orchestrate restore manually.
+	restoreEnabled bool
 
 	// sent caches the result of a successful Send so subsequent Send calls
 	// are no-ops (JS parity: AssembledTransaction.send is idempotent).

@@ -88,7 +88,7 @@ func TestInvoke_UnknownMethodIncludesSuggestion(t *testing.T) {
 	cid := testContractID(t)
 	c := New(cid, &fakeSimulator{}, network.TestNetworkPassphrase,
 		WithSpec(buildTokenLikeSpec(t)),
-		WithSource(newClientSource(t)),
+		WithSourceAccount(newClientSource(t)),
 	)
 
 	_, err := c.Invoke(context.Background(), "transferr", map[string]any{})

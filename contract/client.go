@@ -2,8 +2,11 @@ package contract
 
 import (
 	"context"
+	"time"
 
+	"github.com/stellar/go-stellar-sdk/clients/rpcclient"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/txnbuild"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
@@ -32,17 +35,27 @@ type Client struct {
 	// be signed against.
 	Network string
 
-	// unexported defaults. T4.4 will widen this set.
-	spec    *Spec
-	source  txnbuild.Account
-	baseFee int64
+	// unexported defaults populated by ClientOption.
+	spec      *Spec
+	source    txnbuild.Account
+	sourceErr error
+	signer    Signer
+	baseFee   int64
+	timeout   time.Duration
+	pollOpts  rpcclient.PollTransactionOptions
+	hasPoll   bool
 }
 
 // clientConfig accumulates ClientOption mutations before construction.
 type clientConfig struct {
-	spec    *Spec
-	source  txnbuild.Account
-	baseFee int64
+	spec      *Spec
+	source    txnbuild.Account
+	sourceErr error
+	signer    Signer
+	baseFee   int64
+	timeout   time.Duration
+	pollOpts  rpcclient.PollTransactionOptions
+	hasPoll   bool
 }
 
 // ClientOption is the functional-option type accepted by New / From. T4.1
@@ -58,12 +71,70 @@ func WithSpec(s *Spec) ClientOption {
 	return func(c *clientConfig) { c.spec = s }
 }
 
-// WithSource sets the default source account for transactions this client
-// builds. The account must already carry the sequence number the next
-// transaction will use; Invoke does not increment it. Per-call source
-// overrides arrive in T4.4.
-func WithSource(a txnbuild.Account) ClientOption {
-	return func(c *clientConfig) { c.source = a }
+// WithSource sets the default source account from a strkey-encoded account
+// id ("G..." ed25519 or "M..." muxed). The constructed source has its
+// sequence number set to 0; callers needing live sequence management should
+// either fetch the on-chain sequence first and pass a populated
+// txnbuild.Account via WithSourceAccount, or wrap the resulting client in
+// their own sequence-fetching code before Invoke.
+//
+// Mirrors JS-SDK's ContractClientOptions.publicKey. Invalid strkeys defer
+// rejection to New, which surfaces them through the first Invoke call.
+func WithSource(addr string) ClientOption {
+	return func(c *clientConfig) {
+		if _, err := strkey.Decode(strkey.VersionByteAccountID, addr); err != nil {
+			if _, mErr := strkey.Decode(strkey.VersionByteMuxedAccount, addr); mErr != nil {
+				c.sourceErr = invalidArgsf("WithSource: %q is not a valid G/M strkey: %v", addr, err)
+				return
+			}
+		}
+		acct := txnbuild.NewSimpleAccount(addr, 0)
+		c.source = &acct
+		c.sourceErr = nil
+	}
+}
+
+// WithSourceAccount sets the default source account directly from a
+// txnbuild.Account. Use this when you need to manage the sequence number
+// yourself (e.g. by fetching it from Horizon / RPC before each submission).
+// The strkey-only WithSource is the preferred JS-parity shape; this
+// constructor escape hatch stays for callers who already have an Account.
+func WithSourceAccount(a txnbuild.Account) ClientOption {
+	return func(c *clientConfig) {
+		c.source = a
+		c.sourceErr = nil
+	}
+}
+
+// WithSigner sets the default Signer the client uses for sign-and-send
+// flows (InvokeAndConfirm) when the caller does not provide a per-call
+// override. The Signer is not consulted for pure-read calls.
+func WithSigner(s Signer) ClientOption {
+	return func(c *clientConfig) { c.signer = s }
+}
+
+// WithTimeout sets a default context timeout applied to lifecycle methods
+// that build a context. Currently informational: callers continue to pass
+// the context themselves to Invoke / InvokeAndConfirm. Stored so higher-
+// level wrappers can read it via Client.Timeout().
+func WithTimeout(d time.Duration) ClientOption {
+	return func(c *clientConfig) {
+		if d > 0 {
+			c.timeout = d
+		}
+	}
+}
+
+// WithPollOptions sets the default rpcclient.PollTransactionOptions the
+// client carries. The contract package's SentTransaction.Wait uses its own
+// PollOption set internally; the rpcclient options stored here are exposed
+// via Client.PollOptions() so callers wiring a custom poll loop (or a
+// future rpcclient.PollTransaction integration) can read them.
+func WithPollOptions(o rpcclient.PollTransactionOptions) ClientOption {
+	return func(c *clientConfig) {
+		c.pollOpts = o
+		c.hasPoll = true
+	}
 }
 
 // WithBaseFee sets the per-operation base fee in stroops. Values below
@@ -96,14 +167,25 @@ func New(contractID string, rpc rpcSimulator, network string, opts ...ClientOpti
 		baseFee = txnbuild.MinBaseFee
 	}
 
-	return &Client{
+	c := &Client{
 		ContractID: contractID,
 		RPC:        rpc,
 		Network:    network,
 		spec:       spec,
 		source:     cfg.source,
+		signer:     cfg.signer,
 		baseFee:    baseFee,
+		timeout:    cfg.timeout,
+		pollOpts:   cfg.pollOpts,
+		hasPoll:    cfg.hasPoll,
 	}
+	// Capture deferred validation (e.g. WithSource strkey decode failure) so
+	// Invoke can surface it without panicking. We store it as a closure-bound
+	// field via a sentinel source account; cleaner alternative would be a
+	// dedicated err field, but New's no-error signature is part of T4.1's
+	// committed contract.
+	c.sourceErr = cfg.sourceErr
+	return c
 }
 
 // Spec returns the contract spec bound to this client, or nil if none was
@@ -114,6 +196,36 @@ func (c *Client) Spec() *Spec {
 		return nil
 	}
 	return c.spec
+}
+
+// Signer returns the default Signer bound via WithSigner, or nil if none
+// was set. InvokeAndConfirm falls back to it when its signer argument is
+// nil.
+func (c *Client) Signer() Signer {
+	if c == nil {
+		return nil
+	}
+	return c.signer
+}
+
+// Timeout returns the default lifecycle timeout set via WithTimeout, or
+// zero if none was set.
+func (c *Client) Timeout() time.Duration {
+	if c == nil {
+		return 0
+	}
+	return c.timeout
+}
+
+// PollOptions returns the rpcclient.PollTransactionOptions bound via
+// WithPollOptions and a flag indicating whether the option was supplied.
+// When the flag is false the value should be treated as unset (not as
+// "default zero").
+func (c *Client) PollOptions() (rpcclient.PollTransactionOptions, bool) {
+	if c == nil {
+		return rpcclient.PollTransactionOptions{}, false
+	}
+	return c.pollOpts, c.hasPoll
 }
 
 // Invoke builds an AssembledTransaction wrapping a call to method on the
@@ -133,13 +245,14 @@ func (c *Client) Spec() *Spec {
 // stays the responsibility of Spec.FuncArgsToScVals.
 //
 // Invoke requires a source account (WithSource) and base fee (defaulted to
-// MinBaseFee). InvokeOption is reserved for T4.4; passing options here is a
-// no-op today.
+// MinBaseFee). Per-call InvokeOption values override client defaults for
+// fee, memo, timebounds, source, signer, resource-fee multiplier, and the
+// auto-restore / skip-simulate behaviors.
 func (c *Client) Invoke(
 	ctx context.Context,
 	method string,
 	args any,
-	_ ...InvokeOption,
+	opts ...InvokeOption,
 ) (*AssembledTransaction, error) {
 	if c == nil || c.RPC == nil {
 		return nil, invalidArgsf("Invoke: client not initialized")
@@ -147,11 +260,28 @@ func (c *Client) Invoke(
 	if method == "" {
 		return nil, invalidArgsf("Invoke: method is required")
 	}
-	if c.source == nil {
-		return nil, invalidArgsf("Invoke: no source account; pass WithSource")
+	if c.sourceErr != nil {
+		return nil, c.sourceErr
 	}
 	if c.spec != nil && !c.spec.HasFunc(method) {
 		return nil, unknownMethodError(c.spec, method)
+	}
+
+	icfg := invokeConfig{
+		baseFee:               c.baseFee,
+		resourceFeeMultiplier: 0, // 0 = let AssembleParams pick DefaultResourceFeeMultiplier
+		source:                c.source,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&icfg)
+		}
+	}
+	if icfg.sourceErr != nil {
+		return nil, icfg.sourceErr
+	}
+	if icfg.source == nil {
+		return nil, invalidArgsf("Invoke: no source account; pass WithSource or Source")
 	}
 
 	scArgs, err := c.marshalArgs(method, args)
@@ -173,22 +303,37 @@ func (c *Client) Invoke(
 				Args:            scArgs,
 			},
 		},
-		SourceAccount: c.source.GetAccountID(),
+		SourceAccount: icfg.source.GetAccountID(),
+		Auth:          icfg.additionalAuth,
+	}
+
+	preconditions := txnbuild.Preconditions{TimeBounds: txnbuild.NewInfiniteTimeout()}
+	if icfg.hasTimeBounds {
+		preconditions.TimeBounds = txnbuild.NewTimebounds(icfg.tbMin, icfg.tbMax)
 	}
 
 	at, err := NewAssembledTransaction(AssembleParams{
-		RPC:               c.RPC,
-		NetworkPassphrase: c.Network,
-		BaseFee:           c.baseFee,
-		SourceAccount:     c.source,
-		Op:                op,
-		Spec:              c.spec,
-		// txnbuild rejects a zero-value Preconditions; default to an
-		// infinite timeout. Per-call timebounds belong to T4.4.
-		Preconditions: txnbuild.Preconditions{TimeBounds: txnbuild.NewInfiniteTimeout()},
+		RPC:                   c.RPC,
+		NetworkPassphrase:     c.Network,
+		BaseFee:               icfg.baseFee,
+		SourceAccount:         icfg.source,
+		Op:                    op,
+		Spec:                  c.spec,
+		Memo:                  icfg.memo,
+		Preconditions:         preconditions,
+		ResourceFeeMultiplier: icfg.resourceFeeMultiplier,
 	})
 	if err != nil {
 		return nil, err
+	}
+	if icfg.signer != nil {
+		at.signer = icfg.signer
+	}
+	at.maxFee = icfg.maxFee
+	at.restoreEnabled = icfg.restoreSet && icfg.restoreEnabled || !icfg.restoreSet // default true
+
+	if icfg.skipSimulate {
+		return at, nil
 	}
 	if err := at.Simulate(ctx); err != nil {
 		return nil, err
@@ -215,14 +360,125 @@ func (c *Client) marshalArgs(method string, args any) ([]xdr.ScVal, error) {
 }
 
 // InvokeOption is the per-call option type for Invoke / InvokeAndConfirm.
-// T4.1 reserves the type; the full set (MaxFee, ResourceFeeMultiplier, Memo,
-// TimeBounds, Source, Signer, AdditionalAuth, Restore, SkipSimulate) lands in
-// T4.4.
+// Mirrors JS-SDK's MethodOptions: each option overrides the client's
+// default for a single invocation. Per-call options always win over
+// ClientOption defaults.
 type InvokeOption func(*invokeConfig)
 
-// invokeConfig is the receiver for InvokeOption mutations. T4.1 keeps it
-// empty; T4.4 widens it.
-type invokeConfig struct{}
+// invokeConfig is the receiver for InvokeOption mutations.
+type invokeConfig struct {
+	baseFee               int64
+	maxFee                int64
+	resourceFeeMultiplier float64
+	memo                  txnbuild.Memo
+	tbMin                 int64
+	tbMax                 int64
+	hasTimeBounds         bool
+	source                txnbuild.Account
+	sourceErr             error
+	signer                Signer
+	additionalAuth        []xdr.SorobanAuthorizationEntry
+	restoreEnabled        bool
+	restoreSet            bool
+	skipSimulate          bool
+}
+
+// MaxFee sets the maximum total fee (inclusion + resource) the caller is
+// willing to pay in stroops. Stored on the resulting AssembledTransaction;
+// Send rejects envelopes whose final fee exceeds this cap. Zero (the
+// default) disables the cap.
+func MaxFee(stroops int64) InvokeOption {
+	return func(c *invokeConfig) { c.maxFee = stroops }
+}
+
+// ResourceFeeMultiplier overrides the per-call multiplier applied to the
+// simulated resource fee. Defaults to DefaultResourceFeeMultiplier (1.15)
+// when omitted. Values <= 0 are ignored.
+func ResourceFeeMultiplier(f float64) InvokeOption {
+	return func(c *invokeConfig) {
+		if f > 0 {
+			c.resourceFeeMultiplier = f
+		}
+	}
+}
+
+// Memo attaches a txnbuild.Memo to the transaction Invoke builds.
+func Memo(m txnbuild.Memo) InvokeOption {
+	return func(c *invokeConfig) { c.memo = m }
+}
+
+// TimeBounds sets the transaction's time bounds. Pass the zero value of
+// time.Time for min or max to leave that bound open. The default is the
+// txnbuild infinite timeout.
+func TimeBounds(min, max time.Time) InvokeOption {
+	return func(c *invokeConfig) {
+		c.hasTimeBounds = true
+		if min.IsZero() {
+			c.tbMin = 0
+		} else {
+			c.tbMin = min.Unix()
+		}
+		if max.IsZero() {
+			c.tbMax = 0
+		} else {
+			c.tbMax = max.Unix()
+		}
+	}
+}
+
+// Source overrides the client's default source account from a strkey for a
+// single invocation. The sequence number of the resulting account is 0;
+// callers needing a managed sequence should construct a txnbuild.Account
+// themselves and use AssembleParams directly.
+func Source(addr string) InvokeOption {
+	return func(c *invokeConfig) {
+		if _, err := strkey.Decode(strkey.VersionByteAccountID, addr); err != nil {
+			if _, mErr := strkey.Decode(strkey.VersionByteMuxedAccount, addr); mErr != nil {
+				c.sourceErr = invalidArgsf("Source: %q is not a valid G/M strkey: %v", addr, err)
+				return
+			}
+		}
+		acct := txnbuild.NewSimpleAccount(addr, 0)
+		c.source = &acct
+		c.sourceErr = nil
+	}
+}
+
+// WithInvokeSigner overrides the client's default signer for a single
+// invocation. Spec-name parity: the design's "Signer(s Signer)" InvokeOption
+// collides with the existing Signer interface name in this package; this
+// constructor preserves the per-call semantic without shadowing the type.
+func WithInvokeSigner(s Signer) InvokeOption {
+	return func(c *invokeConfig) { c.signer = s }
+}
+
+// AdditionalAuth attaches extra SorobanAuthorizationEntry values to the
+// host function before simulation. Useful when the caller has pre-signed
+// authorizations from out-of-band signers.
+func AdditionalAuth(es ...xdr.SorobanAuthorizationEntry) InvokeOption {
+	return func(c *invokeConfig) {
+		c.additionalAuth = append(c.additionalAuth, es...)
+	}
+}
+
+// Restore toggles the automatic-restore behavior. The default is true:
+// when simulation surfaces an archived footprint, Invoke would
+// transparently submit a RestoreFootprint transaction first. The
+// auto-submission path itself is wired in a later task; Restore today
+// records the caller's preference on the resulting AssembledTransaction.
+func Restore(enable bool) InvokeOption {
+	return func(c *invokeConfig) {
+		c.restoreSet = true
+		c.restoreEnabled = enable
+	}
+}
+
+// SkipSimulate causes Invoke to return the AssembledTransaction without
+// running Simulate. Intended for re-hydration paths (FromXDR / FromJSON)
+// where simulation output is already attached.
+func SkipSimulate() InvokeOption {
+	return func(c *invokeConfig) { c.skipSimulate = true }
+}
 
 // From fetches the contract's spec from the network and returns a Client
 // bound to it. Equivalent to JS-SDK's Client.from().

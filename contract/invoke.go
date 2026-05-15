@@ -43,6 +43,12 @@ func InvokeAndConfirm(
 		return nil, xdr.Hash{}, invalidArgsf("InvokeAndConfirm: client is nil")
 	}
 	if signer == nil {
+		// Fall back to the client's WithSigner default before declaring
+		// failure so JS-parity flows (client.signer + sendTokens("auto"))
+		// don't require callers to thread the same Signer twice.
+		signer = c.Signer()
+	}
+	if signer == nil {
 		return nil, xdr.Hash{}, invalidArgsf("InvokeAndConfirm: signer is nil")
 	}
 
@@ -62,7 +68,13 @@ func InvokeAndConfirm(
 		return v, xdr.Hash{}, nil
 	}
 
-	sent, err := at.SignAndSend(ctx, signer)
+	// Per-call WithInvokeSigner wins over the function argument; the
+	// argument itself already won over the client default earlier.
+	effectiveSigner := signer
+	if at.signer != nil {
+		effectiveSigner = at.signer
+	}
+	sent, err := at.SignAndSend(ctx, effectiveSigner)
 	if err != nil {
 		return nil, xdr.Hash{}, err
 	}

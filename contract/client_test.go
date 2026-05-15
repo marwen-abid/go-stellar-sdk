@@ -132,7 +132,7 @@ func TestInvoke_BuildsHostFunctionAndSimulates(t *testing.T) {
 
 	c := New(cid, rpc, network.TestNetworkPassphrase,
 		WithSpec(buildBumpSpec(t)),
-		WithSource(newClientSource(t)),
+		WithSourceAccount(newClientSource(t)),
 	)
 
 	args := map[string]any{"amount": uint32(7)}
@@ -169,7 +169,7 @@ func TestInvoke_AcceptsRawScVals(t *testing.T) {
 	rpc := cannedInvokeRPC(t)
 
 	c := New(cid, rpc, network.TestNetworkPassphrase, // no spec on purpose
-		WithSource(newClientSource(t)),
+		WithSourceAccount(newClientSource(t)),
 	)
 
 	rawArgs := []xdr.ScVal{{Type: xdr.ScValTypeScvU32, U32: u32ptr(11)}}
@@ -183,7 +183,7 @@ func TestInvoke_RejectsUnknownMethodWithSpec(t *testing.T) {
 	cid := testContractID(t)
 	c := New(cid, &fakeSimulator{}, network.TestNetworkPassphrase,
 		WithSpec(buildBumpSpec(t)),
-		WithSource(newClientSource(t)),
+		WithSourceAccount(newClientSource(t)),
 	)
 
 	_, err := c.Invoke(context.Background(), "nope", map[string]any{})
@@ -197,7 +197,7 @@ func TestInvoke_RejectsUnknownMethodWithSpec(t *testing.T) {
 func TestInvoke_RejectsMapArgsWithoutSpec(t *testing.T) {
 	cid := testContractID(t)
 	c := New(cid, &fakeSimulator{}, network.TestNetworkPassphrase,
-		WithSource(newClientSource(t)),
+		WithSourceAccount(newClientSource(t)),
 	)
 
 	_, err := c.Invoke(context.Background(), "bump", map[string]any{"amount": uint32(1)})
@@ -224,7 +224,7 @@ func TestInvoke_RequiresSource(t *testing.T) {
 func TestInvoke_EmptyMethodRejected(t *testing.T) {
 	cid := testContractID(t)
 	c := New(cid, &fakeSimulator{}, network.TestNetworkPassphrase,
-		WithSource(newClientSource(t)),
+		WithSourceAccount(newClientSource(t)),
 	)
 	_, err := c.Invoke(context.Background(), "", nil)
 	require.Error(t, err)

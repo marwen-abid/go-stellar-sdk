@@ -93,7 +93,7 @@ func newInvokeAndConfirmClient(t *testing.T, rpc rpcSimulator) (*Client, *keypai
 
 	c := New(cid, rpc, network.TestNetworkPassphrase,
 		WithSpec(buildBumpSpec(t)),
-		WithSource(&acct),
+		WithSourceAccount(&acct),
 	)
 	return c, srcKP
 }
