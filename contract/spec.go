@@ -58,6 +58,13 @@ func NewSpecFromBase64(b64 string) (*Spec, error) {
 	if err != nil {
 		return nil, fmt.Errorf("contract: decoding spec base64: %w", err)
 	}
+	return NewSpecFromBytes(raw)
+}
+
+// NewSpecFromBytes decodes a raw stream of XDR ScSpecEntry records and returns
+// a Spec. Use this when the spec bytes have already been base64-decoded, for
+// example when they are embedded as a binary file via //go:embed.
+func NewSpecFromBytes(raw []byte) (*Spec, error) {
 	entries, err := readSpecEntryStream(raw)
 	if err != nil {
 		return nil, err
