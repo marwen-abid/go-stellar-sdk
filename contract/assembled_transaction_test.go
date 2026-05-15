@@ -40,6 +40,17 @@ type fakeSimulator struct {
 	getRespSeq  []protocol.GetTransactionResponse
 	getErrSeq   []error
 	getHookFunc func(ctx context.Context, req protocol.GetTransactionRequest, callIdx int) (protocol.GetTransactionResponse, error)
+
+	// load-account side state (exercised when Client.Invoke resolves a
+	// WithSource(strkey) default). When loadAcctFunc is set it wins;
+	// otherwise loadAcctResp / loadAcctErr are returned. When all three are
+	// unset, LoadAccount returns a SimpleAccount{addr, 0} so tests that don't
+	// care about the sequence number keep working unchanged.
+	gotLoadAddr   string
+	loadAcctCalls int
+	loadAcctResp  txnbuild.Account
+	loadAcctErr   error
+	loadAcctFunc  func(ctx context.Context, addr string) (txnbuild.Account, error)
 }
 
 func (f *fakeSimulator) SimulateTransaction(_ context.Context, req protocol.SimulateTransactionRequest) (protocol.SimulateTransactionResponse, error) {
@@ -52,6 +63,22 @@ func (f *fakeSimulator) SendTransaction(_ context.Context, req protocol.SendTran
 	f.gotSendReq = req
 	f.sendCalls++
 	return f.sendResp, f.sendErr
+}
+
+func (f *fakeSimulator) LoadAccount(ctx context.Context, addr string) (txnbuild.Account, error) {
+	f.gotLoadAddr = addr
+	f.loadAcctCalls++
+	if f.loadAcctFunc != nil {
+		return f.loadAcctFunc(ctx, addr)
+	}
+	if f.loadAcctErr != nil {
+		return nil, f.loadAcctErr
+	}
+	if f.loadAcctResp != nil {
+		return f.loadAcctResp, nil
+	}
+	acct := txnbuild.NewSimpleAccount(addr, 0)
+	return &acct, nil
 }
 
 func (f *fakeSimulator) GetTransaction(ctx context.Context, req protocol.GetTransactionRequest) (protocol.GetTransactionResponse, error) {

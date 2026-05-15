@@ -9,6 +9,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/keypair"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/protocols/stellarcore"
+	"github.com/stellar/go-stellar-sdk/txnbuild"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -58,6 +59,13 @@ func (s *autoRestoreSim) GetTransaction(_ context.Context, _ protocol.GetTransac
 	s.getCall++
 	s.order = append(s.order, "get")
 	return s.getResp, s.getErr
+}
+
+// LoadAccount is unused by auto-restore tests (they drive the AT lifecycle
+// directly with a pre-populated source). The implementation panics so an
+// accidental call surfaces immediately.
+func (s *autoRestoreSim) LoadAccount(_ context.Context, _ string) (txnbuild.Account, error) {
+	panic("autoRestoreSim.LoadAccount: not expected")
 }
 
 // happyPathSim returns a simulator preloaded with: first Simulate yields a

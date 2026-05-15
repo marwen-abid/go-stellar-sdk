@@ -29,6 +29,12 @@ type rpcSimulator interface {
 	SimulateTransaction(ctx context.Context, req protocol.SimulateTransactionRequest) (protocol.SimulateTransactionResponse, error)
 	SendTransaction(ctx context.Context, req protocol.SendTransactionRequest) (protocol.SendTransactionResponse, error)
 	GetTransaction(ctx context.Context, req protocol.GetTransactionRequest) (protocol.GetTransactionResponse, error)
+	// LoadAccount fetches the live txnbuild.Account (carrying the current
+	// sequence number) for a strkey-encoded G/M address. Used by Client.Invoke
+	// to resolve the source account when WithSource(strkey) was supplied —
+	// matches the JS-SDK shape where the client fetches the account on
+	// demand at invocation time.
+	LoadAccount(ctx context.Context, addr string) (txnbuild.Account, error)
 }
 
 // AssembledTransaction is the JS-parity wrapper around the Soroban

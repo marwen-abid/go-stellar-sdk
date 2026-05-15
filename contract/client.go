@@ -36,26 +36,36 @@ type Client struct {
 	Network string
 
 	// unexported defaults populated by ClientOption.
-	spec      *Spec
-	source    txnbuild.Account
-	sourceErr error
-	signer    Signer
-	baseFee   int64
-	timeout   time.Duration
-	pollOpts  rpcclient.PollTransactionOptions
-	hasPoll   bool
+	spec *Spec
+	// sourceAddr is the strkey-encoded G/M address bound via WithSource.
+	// When non-empty, Invoke resolves the live txnbuild.Account at call time
+	// via rpc.LoadAccount(ctx, sourceAddr) so the transaction picks up the
+	// current sequence number. Mirrors JS-SDK Server.getAccount(publicKey).
+	sourceAddr string
+	// sourceAcct is the pre-populated txnbuild.Account bound via
+	// WithSourceAccount. Used as-is (no fresh fetch) when set; takes
+	// precedence over sourceAddr so callers managing their own sequence
+	// number aren't surprised by a live re-fetch.
+	sourceAcct txnbuild.Account
+	sourceErr  error
+	signer     Signer
+	baseFee    int64
+	timeout    time.Duration
+	pollOpts   rpcclient.PollTransactionOptions
+	hasPoll    bool
 }
 
 // clientConfig accumulates ClientOption mutations before construction.
 type clientConfig struct {
-	spec      *Spec
-	source    txnbuild.Account
-	sourceErr error
-	signer    Signer
-	baseFee   int64
-	timeout   time.Duration
-	pollOpts  rpcclient.PollTransactionOptions
-	hasPoll   bool
+	spec       *Spec
+	sourceAddr string
+	sourceAcct txnbuild.Account
+	sourceErr  error
+	signer     Signer
+	baseFee    int64
+	timeout    time.Duration
+	pollOpts   rpcclient.PollTransactionOptions
+	hasPoll    bool
 }
 
 // ClientOption is the functional-option type accepted by New / From. T4.1
@@ -72,14 +82,14 @@ func WithSpec(s *Spec) ClientOption {
 }
 
 // WithSource sets the default source account from a strkey-encoded account
-// id ("G..." ed25519 or "M..." muxed). The constructed source has its
-// sequence number set to 0; callers needing live sequence management should
-// either fetch the on-chain sequence first and pass a populated
-// txnbuild.Account via WithSourceAccount, or wrap the resulting client in
-// their own sequence-fetching code before Invoke.
+// id ("G..." ed25519 or "M..." muxed). The client fetches the live
+// txnbuild.Account (carrying the current sequence number) at Invoke time via
+// rpc.LoadAccount, so callers don't need to manage sequences themselves.
 //
-// Mirrors JS-SDK's ContractClientOptions.publicKey. Invalid strkeys defer
-// rejection to New, which surfaces them through the first Invoke call.
+// Mirrors JS-SDK's ContractClientOptions.publicKey + Server.getAccount.
+// Invalid strkeys defer rejection to New, which surfaces them through the
+// first Invoke call. Use WithSourceAccount when you already have a managed
+// txnbuild.Account and want to skip the fresh fetch.
 func WithSource(addr string) ClientOption {
 	return func(c *clientConfig) {
 		if _, err := strkey.Decode(strkey.VersionByteAccountID, addr); err != nil {
@@ -88,20 +98,20 @@ func WithSource(addr string) ClientOption {
 				return
 			}
 		}
-		acct := txnbuild.NewSimpleAccount(addr, 0)
-		c.source = &acct
+		c.sourceAddr = addr
 		c.sourceErr = nil
 	}
 }
 
 // WithSourceAccount sets the default source account directly from a
 // txnbuild.Account. Use this when you need to manage the sequence number
-// yourself (e.g. by fetching it from Horizon / RPC before each submission).
-// The strkey-only WithSource is the preferred JS-parity shape; this
-// constructor escape hatch stays for callers who already have an Account.
+// yourself (e.g. by fetching it from Horizon / RPC before each submission)
+// and want to skip the live-fetch behavior of WithSource. The strkey-only
+// WithSource is the preferred JS-parity shape; this escape hatch is for
+// callers who already have an Account in hand.
 func WithSourceAccount(a txnbuild.Account) ClientOption {
 	return func(c *clientConfig) {
-		c.source = a
+		c.sourceAcct = a
 		c.sourceErr = nil
 	}
 }
@@ -172,7 +182,8 @@ func New(contractID string, rpc rpcSimulator, network string, opts ...ClientOpti
 		RPC:        rpc,
 		Network:    network,
 		spec:       spec,
-		source:     cfg.source,
+		sourceAddr: cfg.sourceAddr,
+		sourceAcct: cfg.sourceAcct,
 		signer:     cfg.signer,
 		baseFee:    baseFee,
 		timeout:    cfg.timeout,
@@ -270,7 +281,8 @@ func (c *Client) Invoke(
 	icfg := invokeConfig{
 		baseFee:               c.baseFee,
 		resourceFeeMultiplier: 0, // 0 = let AssembleParams pick DefaultResourceFeeMultiplier
-		source:                c.source,
+		sourceAddr:            c.sourceAddr,
+		sourceAcct:            c.sourceAcct,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -280,8 +292,9 @@ func (c *Client) Invoke(
 	if icfg.sourceErr != nil {
 		return nil, icfg.sourceErr
 	}
-	if icfg.source == nil {
-		return nil, invalidArgsf("Invoke: no source account; pass WithSource or Source")
+	source, err := c.resolveSource(ctx, &icfg)
+	if err != nil {
+		return nil, err
 	}
 
 	scArgs, err := c.marshalArgs(method, args)
@@ -303,7 +316,7 @@ func (c *Client) Invoke(
 				Args:            scArgs,
 			},
 		},
-		SourceAccount: icfg.source.GetAccountID(),
+		SourceAccount: source.GetAccountID(),
 		Auth:          icfg.additionalAuth,
 	}
 
@@ -316,7 +329,7 @@ func (c *Client) Invoke(
 		RPC:                   c.RPC,
 		NetworkPassphrase:     c.Network,
 		BaseFee:               icfg.baseFee,
-		SourceAccount:         icfg.source,
+		SourceAccount:         source,
 		Op:                    op,
 		Spec:                  c.spec,
 		Memo:                  icfg.memo,
@@ -339,6 +352,25 @@ func (c *Client) Invoke(
 		return nil, err
 	}
 	return at, nil
+}
+
+// resolveSource picks the txnbuild.Account Invoke will hand to
+// AssembleParams: a pre-populated sourceAcct (WithSourceAccount) wins; else
+// the strkey sourceAddr (WithSource / Source) drives a fresh
+// rpc.LoadAccount fetch so the transaction sees the current sequence number.
+// Returns an InvalidArgs error when neither is set.
+func (c *Client) resolveSource(ctx context.Context, icfg *invokeConfig) (txnbuild.Account, error) {
+	if icfg.sourceAcct != nil {
+		return icfg.sourceAcct, nil
+	}
+	if icfg.sourceAddr != "" {
+		acct, err := c.RPC.LoadAccount(ctx, icfg.sourceAddr)
+		if err != nil {
+			return nil, &Error{Kind: KindSimulationFailed, Details: "Invoke: load source account", cause: err}
+		}
+		return acct, nil
+	}
+	return nil, invalidArgsf("Invoke: no source account; pass WithSource or Source")
 }
 
 // marshalArgs converts the args parameter accepted by Invoke into the
@@ -374,13 +406,18 @@ type invokeConfig struct {
 	tbMin                 int64
 	tbMax                 int64
 	hasTimeBounds         bool
-	source                txnbuild.Account
-	sourceErr             error
-	signer                Signer
-	additionalAuth        []xdr.SorobanAuthorizationEntry
-	restoreEnabled        bool
-	restoreSet            bool
-	skipSimulate          bool
+	// sourceAddr / sourceAcct mirror the Client fields. A per-call Source
+	// option always sets sourceAddr (and clears the inherited sourceAcct) so
+	// it routes through the live LoadAccount path; callers needing a managed
+	// sequence should construct a txnbuild.Account and use AssembleParams.
+	sourceAddr     string
+	sourceAcct     txnbuild.Account
+	sourceErr      error
+	signer         Signer
+	additionalAuth []xdr.SorobanAuthorizationEntry
+	restoreEnabled bool
+	restoreSet     bool
+	skipSimulate   bool
 }
 
 // MaxFee sets the maximum total fee (inclusion + resource) the caller is
@@ -427,9 +464,9 @@ func TimeBounds(min, max time.Time) InvokeOption {
 }
 
 // Source overrides the client's default source account from a strkey for a
-// single invocation. The sequence number of the resulting account is 0;
-// callers needing a managed sequence should construct a txnbuild.Account
-// themselves and use AssembleParams directly.
+// single invocation. The live txnbuild.Account is fetched at Invoke time via
+// rpc.LoadAccount(ctx, addr); callers needing a managed sequence should
+// construct a txnbuild.Account themselves and use AssembleParams directly.
 func Source(addr string) InvokeOption {
 	return func(c *invokeConfig) {
 		if _, err := strkey.Decode(strkey.VersionByteAccountID, addr); err != nil {
@@ -438,8 +475,8 @@ func Source(addr string) InvokeOption {
 				return
 			}
 		}
-		acct := txnbuild.NewSimpleAccount(addr, 0)
-		c.source = &acct
+		c.sourceAddr = addr
+		c.sourceAcct = nil // per-call override always routes through live fetch
 		c.sourceErr = nil
 	}
 }

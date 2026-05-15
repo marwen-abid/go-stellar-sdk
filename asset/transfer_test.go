@@ -200,13 +200,6 @@ type capturedSimReq struct {
 	respondWith  protocol.SimulateTransactionResponse
 }
 
-type jsonRPCRequest struct {
-	JSONRPC string                              `json:"jsonrpc"`
-	Method  string                              `json:"method"`
-	Params  protocol.SimulateTransactionRequest `json:"params"`
-	ID      any                                 `json:"id"`
-}
-
 type jsonRPCResponse struct {
 	JSONRPC string `json:"jsonrpc"`
 	Result  any    `json:"result"`
@@ -216,26 +209,78 @@ type jsonRPCResponse struct {
 func newSimulateServer(t *testing.T, captured *capturedSimReq) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req jsonRPCRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// Peek at the method without consuming Params yet — getLedgerEntries
+		// (used by rpcclient.LoadAccount to resolve the source account) is
+		// transparently fulfilled with a canned seq-0 account so the
+		// simulate-flow tests don't need to script the lookup.
+		var head struct {
+			JSONRPC string          `json:"jsonrpc"`
+			Method  string          `json:"method"`
+			Params  json.RawMessage `json:"params"`
+			ID      any             `json:"id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&head); err != nil {
 			t.Fatalf("decode rpc req: %v", err)
 		}
-		if req.Method != protocol.SimulateTransactionMethodName {
-			t.Fatalf("unexpected rpc method %q", req.Method)
-		}
-		captured.calls++
-		captured.lastEnvelope = req.Params.Transaction
 
-		resp := jsonRPCResponse{
-			JSONRPC: "2.0",
-			Result:  captured.respondWith,
-			ID:      req.ID,
+		var result any
+		switch head.Method {
+		case protocol.SimulateTransactionMethodName:
+			var p protocol.SimulateTransactionRequest
+			if err := json.Unmarshal(head.Params, &p); err != nil {
+				t.Fatalf("decode simulate params: %v", err)
+			}
+			captured.calls++
+			captured.lastEnvelope = p.Transaction
+			result = captured.respondWith
+		case protocol.GetLedgerEntriesMethodName:
+			var p protocol.GetLedgerEntriesRequest
+			if err := json.Unmarshal(head.Params, &p); err != nil {
+				t.Fatalf("decode getLedgerEntries params: %v", err)
+			}
+			result = accountLookupResponse(t, p)
+		default:
+			t.Fatalf("unexpected rpc method %q", head.Method)
 		}
+
+		resp := jsonRPCResponse{JSONRPC: "2.0", Result: result, ID: head.ID}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			t.Fatalf("encode rpc resp: %v", err)
 		}
 	}))
+}
+
+// accountLookupResponse builds a GetLedgerEntriesResponse that satisfies
+// rpcclient.LoadAccount for the AccountId encoded in the request's first
+// key. The returned SimpleAccount uses sequence 0; tests that care about
+// the live sequence number should build their own response.
+func accountLookupResponse(t *testing.T, req protocol.GetLedgerEntriesRequest) protocol.GetLedgerEntriesResponse {
+	t.Helper()
+	if len(req.Keys) == 0 {
+		t.Fatalf("getLedgerEntries: missing keys")
+	}
+	var key xdr.LedgerKey
+	if err := xdr.SafeUnmarshalBase64(req.Keys[0], &key); err != nil {
+		t.Fatalf("decode ledger key: %v", err)
+	}
+	if key.Type != xdr.LedgerEntryTypeAccount || key.Account == nil {
+		t.Fatalf("getLedgerEntries: expected Account key, got %s", key.Type)
+	}
+	entry := xdr.LedgerEntryData{
+		Type: xdr.LedgerEntryTypeAccount,
+		Account: &xdr.AccountEntry{
+			AccountId: key.Account.AccountId,
+			SeqNum:    0,
+		},
+	}
+	dataB64, err := xdr.MarshalBase64(entry)
+	if err != nil {
+		t.Fatalf("marshal account entry: %v", err)
+	}
+	return protocol.GetLedgerEntriesResponse{
+		Entries: []protocol.LedgerEntryResult{{DataXDR: dataB64}},
+	}
 }
 
 // canonicalReadCallResp returns a simulate response shaped as a read call

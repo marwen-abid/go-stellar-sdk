@@ -279,6 +279,20 @@ func (r *fakeRPCRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		result = r.sendResp
 	case protocol.GetTransactionMethodName:
 		result = r.getResp
+	case protocol.GetLedgerEntriesMethodName:
+		// rpcclient.LoadAccount call triggered by contract.Client.Invoke
+		// when WithSource(strkey) routes through the live source-fetch.
+		// The lookup isn't part of the canonical sequence callers assert
+		// against, so we don't record it here; assertSequence only sees
+		// the simulate/send/get triplet.
+		r.mu.Lock()
+		r.methodCalls = r.methodCalls[:len(r.methodCalls)-1]
+		r.mu.Unlock()
+		var p protocol.GetLedgerEntriesRequest
+		if err := json.Unmarshal(raw.Params, &p); err != nil {
+			r.t.Fatalf("decode getLedgerEntries params: %v", err)
+		}
+		result = accountLookupResponse(r.t, p)
 	default:
 		r.t.Fatalf("unexpected rpc method %q", raw.Method)
 	}

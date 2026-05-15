@@ -24,8 +24,51 @@ func TestWithSource_StrkeyRoundTrips(t *testing.T) {
 	addr := keypair.MustRandom().Address()
 
 	c := New(cid, &fakeSimulator{}, network.TestNetworkPassphrase, WithSource(addr))
-	require.NotNil(t, c.source, "WithSource must populate the source account")
-	assert.Equal(t, addr, c.source.GetAccountID())
+	assert.Equal(t, addr, c.sourceAddr, "WithSource stores the strkey; account is fetched at Invoke time")
+	assert.Nil(t, c.sourceAcct, "WithSource must not fabricate a SimpleAccount")
+}
+
+func TestWithSource_FetchesAccountAtInvoke(t *testing.T) {
+	// WithSource(strkey) must defer account resolution to Invoke time and
+	// pick up the live sequence number from rpc.LoadAccount.
+	cid := testContractID(t)
+	addr := keypair.MustRandom().Address()
+	live := txnbuild.NewSimpleAccount(addr, 42)
+
+	rpc := cannedInvokeRPC(t)
+	rpc.loadAcctResp = &live
+
+	c := New(cid, rpc, network.TestNetworkPassphrase,
+		WithSpec(buildBumpSpec(t)),
+		WithSource(addr),
+	)
+	at, err := c.Invoke(context.Background(), "bump", map[string]any{"amount": uint32(1)})
+	require.NoError(t, err)
+	require.NotNil(t, at)
+	assert.Equal(t, 1, rpc.loadAcctCalls, "Invoke must call LoadAccount once")
+	assert.Equal(t, addr, rpc.gotLoadAddr)
+
+	seq, err := at.source.GetSequenceNumber()
+	require.NoError(t, err)
+	assert.Equal(t, int64(42), seq, "AT must carry the live sequence number")
+}
+
+func TestWithSource_LoadAccountErrorSurfaces(t *testing.T) {
+	cid := testContractID(t)
+	addr := keypair.MustRandom().Address()
+	rpc := cannedInvokeRPC(t)
+	rpc.loadAcctErr = errors.New("rpc boom")
+
+	c := New(cid, rpc, network.TestNetworkPassphrase,
+		WithSpec(buildBumpSpec(t)),
+		WithSource(addr),
+	)
+	_, err := c.Invoke(context.Background(), "bump", map[string]any{"amount": uint32(1)})
+	require.Error(t, err)
+	var ce *Error
+	require.True(t, errors.As(err, &ce))
+	assert.Equal(t, KindSimulationFailed, ce.Kind)
+	assert.Contains(t, ce.Error(), "load source account")
 }
 
 func TestWithSource_RejectsInvalidStrkey(t *testing.T) {
@@ -45,11 +88,12 @@ func TestWithSource_RejectsInvalidStrkey(t *testing.T) {
 }
 
 func TestWithSourceAccount_StillWorks(t *testing.T) {
-	// Back-compat shim for callers that own sequence management.
+	// Back-compat escape hatch for callers that own sequence management.
 	cid := testContractID(t)
 	src := newClientSource(t)
 	c := New(cid, &fakeSimulator{}, network.TestNetworkPassphrase, WithSourceAccount(src))
-	assert.Same(t, txnbuild.Account(src), c.source)
+	assert.Same(t, txnbuild.Account(src), c.sourceAcct)
+	assert.Empty(t, c.sourceAddr)
 }
 
 func TestWithSigner_RoundTrip(t *testing.T) {
@@ -208,7 +252,7 @@ func TestInvokeOption_SourceOverride(t *testing.T) {
 	assert.Equal(t, overrideAddr, at.source.GetAccountID(),
 		"per-call Source must override client default")
 	// Client default unchanged.
-	assert.NotEqual(t, overrideAddr, c.source.GetAccountID())
+	assert.NotEqual(t, overrideAddr, c.sourceAddr)
 }
 
 func TestInvokeOption_Source_RejectsInvalidStrkey(t *testing.T) {
