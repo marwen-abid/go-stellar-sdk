@@ -117,6 +117,61 @@ func TestAllowance_DecodesI128(t *testing.T) {
 	}
 }
 
+func TestName_DecodesString(t *testing.T) {
+	nm := xdr.ScString("USDC:GA...EXAMPLE")
+	got := &capturedSimReq{
+		respondWith: viewResp(t, xdr.ScVal{Type: xdr.ScValTypeScvString, Str: &nm}),
+	}
+	server := newSimulateServer(t, got)
+	defer server.Close()
+	rpc := rpcclient.NewClient(server.URL, nil)
+	defer rpc.Close()
+
+	tok := newTransferTestToken(t, rpc)
+	n, err := tok.Name(context.Background())
+	if err != nil {
+		t.Fatalf("Name: %v", err)
+	}
+	if n != "USDC:GA...EXAMPLE" {
+		t.Fatalf("Name = %q, want %q", n, "USDC:GA...EXAMPLE")
+	}
+	method, args := decodeInvokeFn(t, got.lastEnvelope)
+	if method != "name" || len(args) != 0 {
+		t.Fatalf("method=%q args=%+v, want name/[]", method, args)
+	}
+}
+
+func TestAuthorized_DecodesBool(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		t.Run(map[bool]string{true: "true", false: "false"}[want], func(t *testing.T) {
+			b := want
+			got := &capturedSimReq{
+				respondWith: viewResp(t, xdr.ScVal{Type: xdr.ScValTypeScvBool, B: &b}),
+			}
+			server := newSimulateServer(t, got)
+			defer server.Close()
+			rpc := rpcclient.NewClient(server.URL, nil)
+			defer rpc.Close()
+
+			tok := newTransferTestToken(t, rpc)
+			ok, err := tok.Authorized(context.Background(), gAddrA)
+			if err != nil {
+				t.Fatalf("Authorized: %v", err)
+			}
+			if ok != want {
+				t.Fatalf("Authorized = %v, want %v", ok, want)
+			}
+			method, args := decodeInvokeFn(t, got.lastEnvelope)
+			if method != "authorized" || len(args) != 1 {
+				t.Fatalf("method=%q args=%+v, want authorized/1 arg", method, args)
+			}
+			if scAddrStrkey(t, args[0]) != gAddrA {
+				t.Fatalf("id arg = %q, want %q", scAddrStrkey(t, args[0]), gAddrA)
+			}
+		})
+	}
+}
+
 // ----- Write ops: happy paths -------------------------------------------
 //
 // Mint/Burn/Approve return an *AssembledTransaction whose underlying
@@ -190,6 +245,32 @@ func TestApprove_EncodesExpirationLedger(t *testing.T) {
 	}
 }
 
+func TestSetAuthorized_BuildsInvokeContractOp(t *testing.T) {
+	got := &capturedSimReq{respondWith: canonicalReadCallResp(t)}
+	server := newSimulateServer(t, got)
+	defer server.Close()
+	rpc := rpcclient.NewClient(server.URL, nil)
+	defer rpc.Close()
+
+	tok := newTransferTestToken(t, rpc)
+	if _, err := tok.SetAuthorized(context.Background(), gAddrA, gAddrB, true); err != nil {
+		t.Fatalf("SetAuthorized: %v", err)
+	}
+	method, args := decodeInvokeFn(t, got.lastEnvelope)
+	if method != "set_authorized" || len(args) != 3 {
+		t.Fatalf("method=%q args=%+v, want set_authorized/3 args", method, args)
+	}
+	if scAddrStrkey(t, args[0]) != gAddrA {
+		t.Fatalf("admin arg = %q, want %q", scAddrStrkey(t, args[0]), gAddrA)
+	}
+	if scAddrStrkey(t, args[1]) != gAddrB {
+		t.Fatalf("id arg = %q, want %q", scAddrStrkey(t, args[1]), gAddrB)
+	}
+	if args[2].Type != xdr.ScValTypeScvBool || args[2].B == nil || *args[2].B != true {
+		t.Fatalf("authorize arg = %+v, want bool(true)", args[2])
+	}
+}
+
 // ----- Argument validation ----------------------------------------------
 
 func TestTokenOps_RejectsBadArgs(t *testing.T) {
@@ -225,6 +306,18 @@ func TestTokenOps_RejectsBadArgs(t *testing.T) {
 			_, err := tok.Allowance(ctx, "x", gAddrB)
 			return err
 		}, "encode from"},
+		{"Authorized bad id", func() error {
+			_, err := tok.Authorized(ctx, "not-a-strkey")
+			return err
+		}, "encode id"},
+		{"SetAuthorized bad admin", func() error {
+			_, err := tok.SetAuthorized(ctx, "", gAddrB, true)
+			return err
+		}, "encode admin"},
+		{"SetAuthorized bad id", func() error {
+			_, err := tok.SetAuthorized(ctx, gAddrA, "nope", true)
+			return err
+		}, "encode id"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

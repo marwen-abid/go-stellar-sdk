@@ -11,9 +11,9 @@ import (
 )
 
 // ErrInvalidTokenOpArg is returned by the Token operation methods (Balance,
-// Decimals, Symbol, Mint, Burn, Approve, Allowance) when their arguments fail
-// pre-flight validation — malformed strkey, nil amount, etc. Callers can
-// branch on it via errors.Is.
+// Decimals, Symbol, Name, Mint, Burn, Approve, Allowance, Authorized,
+// SetAuthorized) when their arguments fail pre-flight validation — malformed
+// strkey, nil amount, etc. Callers can branch on it via errors.Is.
 var ErrInvalidTokenOpArg = errors.New("asset: invalid Token operation argument")
 
 // Balance returns the SAC `balance(id)` view for the given account or
@@ -68,6 +68,47 @@ func (t *Token) Symbol(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("%w: Symbol: unexpected return %T", ErrInvalidTokenOpArg, v)
 	}
 	return s, nil
+}
+
+// Name returns the SAC `name()` view as a string. Read-only, no Signer
+// required. For classic assets this is the asset's canonical descriptor
+// (e.g. `"USDC:GA...EXAMPLE"`).
+func (t *Token) Name(ctx context.Context) (string, error) {
+	if err := t.checkClient("Name"); err != nil {
+		return "", err
+	}
+	v, err := t.invokeView(ctx, "name", []xdr.ScVal{})
+	if err != nil {
+		return "", err
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", fmt.Errorf("%w: Name: unexpected return %T", ErrInvalidTokenOpArg, v)
+	}
+	return s, nil
+}
+
+// Authorized returns the SAC `authorized(id)` view: whether `id` is currently
+// authorized to hold and transfer the asset. Read-only, no Signer required.
+// `id` must be a valid G/M/C strkey; otherwise Authorized returns an error
+// wrapping ErrInvalidTokenOpArg.
+func (t *Token) Authorized(ctx context.Context, id string) (bool, error) {
+	if err := t.checkClient("Authorized"); err != nil {
+		return false, err
+	}
+	idScv, err := xdr.ScvAddress(id)
+	if err != nil {
+		return false, fmt.Errorf("%w: Authorized: encode id: %v", ErrInvalidTokenOpArg, err)
+	}
+	v, err := t.invokeView(ctx, "authorized", []xdr.ScVal{idScv})
+	if err != nil {
+		return false, err
+	}
+	b, ok := v.(bool)
+	if !ok {
+		return false, fmt.Errorf("%w: Authorized: unexpected return %T", ErrInvalidTokenOpArg, v)
+	}
+	return b, nil
 }
 
 // Allowance returns the remaining SEP-41 allowance `spender` may transfer on
@@ -190,6 +231,36 @@ func (t *Token) Approve(
 	}
 	callOpts = append(callOpts, opts...)
 	return t.client.Invoke(ctx, "approve", []xdr.ScVal{fromScv, spenderScv, amountScv, expScv}, callOpts...)
+}
+
+// SetAuthorized invokes the SAC `set_authorized(admin, id, authorize)` admin
+// function, flipping the authorization flag for `id`. The returned
+// *contract.AssembledTransaction must be SignAndSend-ed by the token admin to
+// take effect.
+func (t *Token) SetAuthorized(
+	ctx context.Context,
+	admin, id string,
+	authorize bool,
+	opts ...contract.InvokeOption,
+) (*contract.AssembledTransaction, error) {
+	if err := t.checkClient("SetAuthorized"); err != nil {
+		return nil, err
+	}
+	adminScv, err := xdr.ScvAddress(admin)
+	if err != nil {
+		return nil, fmt.Errorf("%w: SetAuthorized: encode admin: %v", ErrInvalidTokenOpArg, err)
+	}
+	idScv, err := xdr.ScvAddress(id)
+	if err != nil {
+		return nil, fmt.Errorf("%w: SetAuthorized: encode id: %v", ErrInvalidTokenOpArg, err)
+	}
+	authScv := xdr.ScvBool(authorize)
+	callOpts := make([]contract.InvokeOption, 0, len(opts)+1)
+	if classifyTransferAddress(admin) == transferAddrAccount {
+		callOpts = append(callOpts, contract.Source(admin))
+	}
+	callOpts = append(callOpts, opts...)
+	return t.client.Invoke(ctx, "set_authorized", []xdr.ScVal{adminScv, idScv, authScv}, callOpts...)
 }
 
 // checkClient guards every Token operation against a nil receiver or
