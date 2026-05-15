@@ -2,10 +2,12 @@ package contract
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"math"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/protocols/stellarcore"
 	"github.com/stellar/go-stellar-sdk/txnbuild"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
@@ -17,11 +19,14 @@ import (
 const DefaultResourceFeeMultiplier = 1.15
 
 // rpcSimulator is the minimal slice of the RPC client surface that
-// AssembledTransaction needs at this stage. Subsequent phases (Send, Wait)
-// will widen this interface. Accepting an interface keeps the type unit
-// testable without standing up a live RPC.
+// AssembledTransaction needs. It is extended one method at a time as new
+// lifecycle steps land (Simulate in T3.1, SendTransaction in T3.4, the
+// get/poll calls in T3.5). Accepting an interface keeps the type unit
+// testable without standing up a live RPC; the concrete
+// *rpcclient.Client already implements every method.
 type rpcSimulator interface {
 	SimulateTransaction(ctx context.Context, req protocol.SimulateTransactionRequest) (protocol.SimulateTransactionResponse, error)
+	SendTransaction(ctx context.Context, req protocol.SendTransactionRequest) (protocol.SendTransactionResponse, error)
 }
 
 // AssembledTransaction is the JS-parity wrapper around the Soroban
@@ -68,6 +73,10 @@ type AssembledTransaction struct {
 	memo                  txnbuild.Memo
 	preconditions         txnbuild.Preconditions
 	resourceFeeMultiplier float64
+
+	// sent caches the result of a successful Send so subsequent Send calls
+	// are no-ops (JS parity: AssembledTransaction.send is idempotent).
+	sent *SentTransaction
 }
 
 // AssembleParams configures a new AssembledTransaction. SourceAccount must
@@ -152,6 +161,73 @@ func NewAssembledTransaction(params AssembleParams) (*AssembledTransaction, erro
 // drop down to txnbuild. The returned pointer should be treated as read-only;
 // subsequent lifecycle steps may replace it.
 func (a *AssembledTransaction) Raw() *txnbuild.Transaction { return a.Built }
+
+// Send submits the signed envelope to the RPC's sendTransaction endpoint and
+// returns a *SentTransaction wrapping the hash and submission response. Send
+// requires Simulate to have run and the envelope to carry at least one
+// signature (Sign must have been called); otherwise it returns an *Error
+// matching ErrNotYetSimulated or wrapping ErrSubmissionFailed.
+//
+// Status handling mirrors the JS SDK's AssembledTransaction.send:
+//
+//   - PENDING / DUPLICATE → success (the transaction is on the RPC's
+//     submission queue or was already accepted previously).
+//   - ERROR / TRY_AGAIN_LATER → returns an *Error wrapping ErrSubmissionFailed
+//     so callers can match with errors.Is and inspect the SentTransaction
+//     attached as the cause's response field for diagnostics.
+//
+// Send is idempotent: a second call after a successful submission returns the
+// cached *SentTransaction without re-submitting. Polling for the on-chain
+// result is the job of *SentTransaction.Wait (lands in T3.5).
+func (a *AssembledTransaction) Send(ctx context.Context) (*SentTransaction, error) {
+	if a == nil || a.rpc == nil {
+		return nil, invalidArgsf("AssembledTransaction not initialized")
+	}
+	if a.Simulation == nil || a.Built == nil {
+		return nil, &Error{Kind: KindNotYetSimulated, Details: "Send"}
+	}
+	if a.sent != nil {
+		return a.sent, nil
+	}
+	if len(a.Built.Signatures()) == 0 {
+		return nil, &Error{Kind: KindSubmissionFailed, Details: "Send: envelope is unsigned; call Sign first"}
+	}
+
+	envelopeB64, err := a.Built.Base64()
+	if err != nil {
+		return nil, fmt.Errorf("contract: encode tx for send: %w", err)
+	}
+
+	resp, err := a.rpc.SendTransaction(ctx, protocol.SendTransactionRequest{
+		Transaction: envelopeB64,
+	})
+	if err != nil {
+		return nil, &Error{Kind: KindSubmissionFailed, cause: err}
+	}
+
+	switch resp.Status {
+	case stellarcore.TXStatusPending, stellarcore.TXStatusDuplicate:
+		// success — fall through.
+	case stellarcore.TXStatusError, stellarcore.TXStatusTryAgainLater:
+		return nil, &Error{Kind: KindSubmissionFailed, Details: fmt.Sprintf("Send: RPC returned %s", resp.Status)}
+	default:
+		return nil, &Error{Kind: KindSubmissionFailed, Details: fmt.Sprintf("Send: unrecognized status %q", resp.Status)}
+	}
+
+	hash, err := decodeHexHash(resp.Hash)
+	if err != nil {
+		return nil, &Error{Kind: KindSubmissionFailed, Details: "Send: decode response hash", cause: err}
+	}
+
+	sent := &SentTransaction{
+		Hash:         hash,
+		SendResponse: &resp,
+		rpc:          a.rpc,
+		method:       a.Method,
+	}
+	a.sent = sent
+	return sent, nil
+}
 
 // Simulate runs simulateTransaction against the RPC client supplied at
 // construction time and folds the response into the transaction:
@@ -301,4 +377,20 @@ func decodeFirstResult(results []protocol.SimulateHostFunctionResult) ([]xdr.Sor
 	}
 
 	return authEntries, returnValue, nil
+}
+
+// decodeHexHash parses a 32-byte hex-encoded transaction hash (as returned
+// by the RPC sendTransaction response) into an xdr.Hash. Lengths other than
+// 64 hex characters are rejected.
+func decodeHexHash(s string) (xdr.Hash, error) {
+	var h xdr.Hash
+	if len(s) != 2*len(h) {
+		return h, fmt.Errorf("hash %q: want %d hex chars, got %d", s, 2*len(h), len(s))
+	}
+	raw, err := hex.DecodeString(s)
+	if err != nil {
+		return h, err
+	}
+	copy(h[:], raw)
+	return h, nil
 }

@@ -123,6 +123,7 @@ var (
 	ErrRestoreRequired     = &Error{Kind: KindRestoreRequired}
 	ErrNeedsMoreSignatures = &Error{Kind: KindNeedsMoreSignatures}
 	ErrAuthMissing         = &Error{Kind: KindAuthMissing}
+	ErrSubmissionFailed    = &Error{Kind: KindSubmissionFailed}
 	ErrTimeout             = &Error{Kind: KindTimeout}
 	ErrNotYetSimulated     = &Error{Kind: KindNotYetSimulated}
 )

@@ -15,17 +15,32 @@ import (
 )
 
 // fakeSimulator captures the request and returns a canned response or error.
+// It also satisfies the SendTransaction side of the rpcSimulator interface so
+// it can serve Send-step tests; the send fields stay zero-valued for the
+// pure-simulate tests in this file.
 type fakeSimulator struct {
 	gotReq protocol.SimulateTransactionRequest
 	calls  int
 	resp   protocol.SimulateTransactionResponse
 	err    error
+
+	// send-side state (used by send_test.go).
+	gotSendReq protocol.SendTransactionRequest
+	sendCalls  int
+	sendResp   protocol.SendTransactionResponse
+	sendErr    error
 }
 
 func (f *fakeSimulator) SimulateTransaction(_ context.Context, req protocol.SimulateTransactionRequest) (protocol.SimulateTransactionResponse, error) {
 	f.gotReq = req
 	f.calls++
 	return f.resp, f.err
+}
+
+func (f *fakeSimulator) SendTransaction(_ context.Context, req protocol.SendTransactionRequest) (protocol.SendTransactionResponse, error) {
+	f.gotSendReq = req
+	f.sendCalls++
+	return f.sendResp, f.sendErr
 }
 
 // helpers ---------------------------------------------------------------
