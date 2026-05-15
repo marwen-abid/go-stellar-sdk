@@ -27,6 +27,7 @@ const DefaultResourceFeeMultiplier = 1.15
 type rpcSimulator interface {
 	SimulateTransaction(ctx context.Context, req protocol.SimulateTransactionRequest) (protocol.SimulateTransactionResponse, error)
 	SendTransaction(ctx context.Context, req protocol.SendTransactionRequest) (protocol.SendTransactionResponse, error)
+	GetTransaction(ctx context.Context, req protocol.GetTransactionRequest) (protocol.GetTransactionResponse, error)
 }
 
 // AssembledTransaction is the JS-parity wrapper around the Soroban

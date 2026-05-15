@@ -29,6 +29,17 @@ type fakeSimulator struct {
 	sendCalls  int
 	sendResp   protocol.SendTransactionResponse
 	sendErr    error
+
+	// get-side state (used by sent_transaction_test.go). When getRespSeq is
+	// non-empty it is consumed one entry per call; otherwise getResp / getErr
+	// are returned on every call. getCalls counts invocations.
+	gotGetReq   protocol.GetTransactionRequest
+	getCalls    int
+	getResp     protocol.GetTransactionResponse
+	getErr      error
+	getRespSeq  []protocol.GetTransactionResponse
+	getErrSeq   []error
+	getHookFunc func(ctx context.Context, req protocol.GetTransactionRequest, callIdx int) (protocol.GetTransactionResponse, error)
 }
 
 func (f *fakeSimulator) SimulateTransaction(_ context.Context, req protocol.SimulateTransactionRequest) (protocol.SimulateTransactionResponse, error) {
@@ -41,6 +52,23 @@ func (f *fakeSimulator) SendTransaction(_ context.Context, req protocol.SendTran
 	f.gotSendReq = req
 	f.sendCalls++
 	return f.sendResp, f.sendErr
+}
+
+func (f *fakeSimulator) GetTransaction(ctx context.Context, req protocol.GetTransactionRequest) (protocol.GetTransactionResponse, error) {
+	f.gotGetReq = req
+	idx := f.getCalls
+	f.getCalls++
+	if f.getHookFunc != nil {
+		return f.getHookFunc(ctx, req, idx)
+	}
+	if idx < len(f.getRespSeq) {
+		var err error
+		if idx < len(f.getErrSeq) {
+			err = f.getErrSeq[idx]
+		}
+		return f.getRespSeq[idx], err
+	}
+	return f.getResp, f.getErr
 }
 
 // helpers ---------------------------------------------------------------

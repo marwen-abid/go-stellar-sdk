@@ -35,6 +35,11 @@ const (
 	// KindInvalidArgs: caller-supplied arguments failed validation before any
 	// network call was made.
 	KindInvalidArgs
+	// KindTransactionFailed: the transaction was included in a ledger with
+	// a FAILED status. Distinct from KindSubmissionFailed (which covers RPC
+	// sendTransaction rejection) — here submission succeeded but on-chain
+	// execution returned an error.
+	KindTransactionFailed
 )
 
 // String returns a stable, lower-case identifier for the kind, suitable for
@@ -59,6 +64,8 @@ func (k ErrorKind) String() string {
 		return "not_yet_simulated"
 	case KindInvalidArgs:
 		return "invalid_args"
+	case KindTransactionFailed:
+		return "transaction_failed"
 	case KindUnknown:
 		fallthrough
 	default:
@@ -126,6 +133,7 @@ var (
 	ErrSubmissionFailed    = &Error{Kind: KindSubmissionFailed}
 	ErrTimeout             = &Error{Kind: KindTimeout}
 	ErrNotYetSimulated     = &Error{Kind: KindNotYetSimulated}
+	ErrTransactionFailed   = &Error{Kind: KindTransactionFailed}
 )
 
 // ContractRevertError is returned (wrapped in an *Error with KindContractRevert)
