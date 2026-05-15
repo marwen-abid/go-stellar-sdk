@@ -209,4 +209,5 @@ The [`networktest`](../networktest) package wraps `stellar network container sta
 - [godoc — `contract/events`](https://pkg.go.dev/github.com/stellar/go-stellar-sdk/contract/events)
 - [godoc — `asset`](https://pkg.go.dev/github.com/stellar/go-stellar-sdk/asset)
 - Cookbook: `docs/` (classic transfer, SAC transfer, multi-party auth, event streaming, codegen)
+- Runnable examples: [`go-stellar-sdk-demo`](https://github.com/marwen-abid/go-stellar-sdk-demo) — twelve numbered examples covering the 5-line send, SEP-41 surface, generic invoke, multi-party signing, events, errors, and codegen (testnet-only).
 - Cross-SDK parity: `stellar-sdk-token-transfer-comparison.md` at the workspace root

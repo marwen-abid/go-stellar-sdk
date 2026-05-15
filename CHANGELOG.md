@@ -12,6 +12,8 @@ This monorepo contains a number of sdk's:
 Official project releases may be found here: https://github.com/stellar/go-stellar-sdk/releases
 ## Pending
 
+* contract: README now links to [`go-stellar-sdk-demo`](https://github.com/marwen-abid/go-stellar-sdk-demo) for runnable examples covering the 5-line send, SEP-41 surface, generic invoke, multi-party signing, events, errors, and codegen.
+
 ## [0.3.0]
 
 ### Security Fixes
