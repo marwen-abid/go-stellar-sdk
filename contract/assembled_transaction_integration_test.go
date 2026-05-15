@@ -421,7 +421,7 @@ func TestLifecycle_XDRRoundTrip_ThenSignAndSend(t *testing.T) {
 	}
 	atB, err := FromXDR(context.Background(), hostB, encoded,
 		WithNetworkPassphrase(network.TestNetworkPassphrase),
-		WithSpec(buildBumpSpec(t)),
+		WithSpecOverride(buildBumpSpec(t)),
 	)
 	require.NoError(t, err)
 	require.NotNil(t, atB.Simulation, "rehydrated AT must look simulated")

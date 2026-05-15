@@ -295,7 +295,7 @@ func TestWithSpecOverridesRegistry(t *testing.T) {
 	override := &Spec{}
 	rehydrated, err := FromJSON(context.Background(), &fakeSimulator{}, payload,
 		WithNetworkPassphrase(network.TestNetworkPassphrase),
-		WithSpec(override),
+		WithSpecOverride(override),
 	)
 	require.NoError(t, err)
 	assert.Same(t, override, rehydrated.spec)

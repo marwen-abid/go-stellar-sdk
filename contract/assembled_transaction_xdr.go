@@ -70,12 +70,13 @@ func WithNetworkPassphrase(network string) FromOption {
 	return func(c *fromConfig) { c.network = network }
 }
 
-// WithSpec attaches an optional Spec to the rehydrated transaction so
+// WithSpecOverride attaches an optional Spec to the rehydrated transaction so
 // Result() can decode the return value into a native Go type. When omitted,
 // FromXDR / FromJSON consult the package-level spec registry using the
 // envelope's contract ID; if neither yields a Spec the transaction works
-// fine but Result() returns raw xdr.ScVal.
-func WithSpec(s *Spec) FromOption {
+// fine but Result() returns raw xdr.ScVal. The matching client-level option
+// is named WithSpec — this variant is the FromXDR/FromJSON-specific override.
+func WithSpecOverride(s *Spec) FromOption {
 	return func(c *fromConfig) { c.spec = s }
 }
 
