@@ -11,7 +11,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
-func TestRun_FromWasm_WritesPlaceholder(t *testing.T) {
+func TestRun_FromWasm_WritesBindings(t *testing.T) {
 	wasm := buildWasm(t, "contractspecv0", encodeEntries(t, []xdr.ScSpecEntry{fnEntry(t, "transfer")}))
 	dir := t.TempDir()
 	wasmPath := filepath.Join(dir, "c.wasm")
@@ -35,12 +35,12 @@ func TestRun_FromWasm_WritesPlaceholder(t *testing.T) {
 	if !strings.Contains(body, "package token") {
 		t.Errorf("missing package decl in %q", body)
 	}
-	if !strings.Contains(body, "SpecEntryCount = 1") {
-		t.Errorf("expected entry count 1, got %q", body)
+	if !strings.Contains(body, "func (c *Client) Transfer(") {
+		t.Errorf("expected emitted Transfer method, got %q", body)
 	}
 }
 
-func TestRun_FromSpec_WritesPlaceholder(t *testing.T) {
+func TestRun_FromSpec_WritesBindings(t *testing.T) {
 	raw := encodeEntries(t, []xdr.ScSpecEntry{fnEntry(t, "balance"), fnEntry(t, "transfer")})
 	dir := t.TempDir()
 	specPath := filepath.Join(dir, "spec.bin")
@@ -57,8 +57,12 @@ func TestRun_FromSpec_WritesPlaceholder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read output: %v", err)
 	}
-	if !strings.Contains(string(got), "SpecEntryCount = 2") {
-		t.Errorf("expected entry count 2, got %q", string(got))
+	body := string(got)
+	if !strings.Contains(body, "func (c *Client) Balance(") {
+		t.Errorf("expected Balance method, got %q", body)
+	}
+	if !strings.Contains(body, "func (c *Client) Transfer(") {
+		t.Errorf("expected Transfer method, got %q", body)
 	}
 }
 
