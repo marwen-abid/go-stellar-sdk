@@ -158,7 +158,9 @@ func TestDecode_NoDecoderRegisteredReturnsErrNoDecoder(t *testing.T) {
 
 	var raw [32]byte
 	raw[0] = 0xAB
-	evt := makeContractEvent(t, raw, "transfer")
+	// "custom_event" is not a SEP-41 topic, so the Decode fallback should
+	// not kick in and ErrNoDecoder is returned.
+	evt := makeContractEvent(t, raw, "custom_event")
 
 	_, err := Decode(evt)
 	assert.ErrorIs(t, err, ErrNoDecoder)

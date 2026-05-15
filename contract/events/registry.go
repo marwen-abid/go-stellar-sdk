@@ -26,10 +26,8 @@ type EventDecoder interface {
 }
 
 // ErrNoDecoder is returned by Decode when no decoder has been registered for
-// the (contractID, topic) pair carried by the event. T6.3 will extend Decode
-// to fall back to a SEP-41 generic parser for the canonical
-// transfer/mint/burn/clawback topics; until then a miss is reported as
-// ErrNoDecoder.
+// the (contractID, topic) pair carried by the event, and the topic is not
+// one of the canonical SEP-41 topics that the generic fallback handles.
 var ErrNoDecoder = errors.New("events: no decoder registered for event")
 
 // ErrUnaddressableEvent is returned by Decode when the event does not carry
@@ -70,9 +68,10 @@ func LookupDecoder(contractID, topic string) EventDecoder {
 
 // Decode looks up a registered decoder for e's (contractID, leading-topic)
 // pair and invokes it. Returns ErrUnaddressableEvent if e lacks the metadata
-// to form a key, and ErrNoDecoder if no decoder is registered. T6.3 will add
-// a SEP-41 generic fallback for the canonical transfer/mint/burn/clawback
-// topics.
+// to form a key. If no contract-specific decoder is registered but the
+// leading topic is one of the canonical SEP-41 topics, Decode falls back
+// to the generic SEP-41 parser (see sep41.go). Otherwise ErrNoDecoder is
+// returned.
 func Decode(e xdr.ContractEvent) (any, error) {
 	cid, topic, err := eventKey(e)
 	if err != nil {
@@ -80,6 +79,9 @@ func Decode(e xdr.ContractEvent) (any, error) {
 	}
 	if d := LookupDecoder(cid, topic); d != nil {
 		return d.Decode(e)
+	}
+	if _, ok := SEP41Topics[topic]; ok {
+		return decodeSEP41(e)
 	}
 	return nil, ErrNoDecoder
 }
