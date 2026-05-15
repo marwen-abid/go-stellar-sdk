@@ -88,6 +88,98 @@ func TestIntegration_GenerateMatchesGolden(t *testing.T) {
 	}
 }
 
+// TestSACBindingSmoke closes Phase 8: it proves the codegen pipeline produces
+// working Go on a realistic input — the bundled SAC spec, which carries
+// 16 functions, 8 events, addresses, i128s, and a handful of bool/string
+// return types. The check is broader than T8.4's golden-diff because it also
+// `go build`s and `go test`s the emitted package, exercising the generated
+// (*Client).Balance / .Decimals / .Symbol against a fake rpc.
+//
+// Steps:
+//  1. Regenerate the binding from asset/sac_spec.bin into a scratch dir.
+//  2. Diff the regenerated file against the committed golden under
+//     cmd/sorobangen/testdata/sac/gen/sac.go.
+//  3. `go build` the committed package directly so a stale golden surfaces as
+//     a build failure rather than a silent diff.
+//  4. `go test` the committed package's in-tree smoke test (sac_test.go),
+//     which calls the generated Client against an in-memory rpc.
+//
+//go:generate go run . -spec ../../asset/sac_spec.bin -out testdata/sac/gen -package sac -contract-id CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA
+func TestSACBindingSmoke(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping SAC binding smoke test in -short mode")
+	}
+
+	repoRoot := findRepoRoot(t)
+	specPath := filepath.Join(repoRoot, "asset", "sac_spec.bin")
+	goldenPath := filepath.Join(repoRoot, "cmd", "sorobangen", "testdata", "sac", "gen", "sac.go")
+	const contractID = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA"
+
+	if _, err := os.Stat(specPath); err != nil {
+		t.Fatalf("SAC spec missing at %s: %v", specPath, err)
+	}
+	golden, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("read golden %s: %v", goldenPath, err)
+	}
+
+	scratch := t.TempDir()
+	binPath := filepath.Join(scratch, "sorobangen")
+	if runtime.GOOS == "windows" {
+		binPath += ".exe"
+	}
+	buildCmd := exec.Command("go", "build", "-o", binPath, "github.com/stellar/go-stellar-sdk/cmd/sorobangen")
+	buildCmd.Dir = repoRoot
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build sorobangen: %v\n%s", err, out)
+	}
+
+	outDir := filepath.Join(scratch, "out")
+	if err := os.Mkdir(outDir, 0o755); err != nil {
+		t.Fatalf("mkdir out: %v", err)
+	}
+	genCmd := exec.Command(binPath,
+		"-spec", specPath,
+		"-out", outDir,
+		"-package", "sac",
+		"-contract-id", contractID,
+	)
+	if out, err := genCmd.CombinedOutput(); err != nil {
+		t.Fatalf("run sorobangen against SAC spec: %v\n%s", err, out)
+	}
+
+	got, err := os.ReadFile(filepath.Join(outDir, "sac.go"))
+	if err != nil {
+		t.Fatalf("read regenerated SAC binding: %v", err)
+	}
+	if !bytes.Equal(got, golden) {
+		t.Errorf("regenerated SAC binding does not match golden %s.\n"+
+			"Fresh output written to %s.\n"+
+			"To refresh: go generate ./cmd/sorobangen/...",
+			goldenPath, filepath.Join(outDir, "sac.go"))
+	}
+
+	// Confirm the committed golden compiles. The integration test in T8.4
+	// stopped at a syntactic parse check; T8.5 takes the next step so a stale
+	// import / signature mismatch in the emitter is caught here rather than
+	// only at downstream consumption.
+	pkgPath := "github.com/stellar/go-stellar-sdk/cmd/sorobangen/testdata/sac/gen"
+	cb := exec.Command("go", "build", pkgPath)
+	cb.Dir = repoRoot
+	if out, err := cb.CombinedOutput(); err != nil {
+		t.Fatalf("go build %s: %v\n%s", pkgPath, err, out)
+	}
+
+	// Run the in-package smoke test that exercises (*Client).Balance /
+	// .Decimals / .Symbol against an in-memory rpc. This is what proves the
+	// generated Spec actually decodes a SAC happy-path response.
+	ct := exec.Command("go", "test", "-count=1", pkgPath)
+	ct.Dir = repoRoot
+	if out, err := ct.CombinedOutput(); err != nil {
+		t.Fatalf("go test %s: %v\n%s", pkgPath, err, out)
+	}
+}
+
 // findRepoRoot walks up from this test file's directory until it finds a
 // go.mod with the SDK module path. Test working directories vary between
 // `go test` invocations and CI; this anchoring keeps the test robust.
