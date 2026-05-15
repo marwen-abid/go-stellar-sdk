@@ -351,6 +351,120 @@ func TestSpecMarshalUDTErrorEnum(t *testing.T) {
 	}
 }
 
+func TestSpecMarshalUDTUnion(t *testing.T) {
+	// Action is a representative union: a void case, a single-payload tuple
+	// case, and a multi-payload tuple case.
+	udt := xdr.ScSpecUdtUnionV0{
+		Name: "Action",
+		Cases: []xdr.ScSpecUdtUnionCaseV0{
+			{
+				Kind:     xdr.ScSpecUdtUnionCaseV0KindScSpecUdtUnionCaseVoidV0,
+				VoidCase: &xdr.ScSpecUdtUnionCaseVoidV0{Name: "Noop"},
+			},
+			{
+				Kind: xdr.ScSpecUdtUnionCaseV0KindScSpecUdtUnionCaseTupleV0,
+				TupleCase: &xdr.ScSpecUdtUnionCaseTupleV0{
+					Name: "Increment",
+					Type: []xdr.ScSpecTypeDef{ty(xdr.ScSpecTypeScSpecTypeU32)},
+				},
+			},
+			{
+				Kind: xdr.ScSpecUdtUnionCaseV0KindScSpecUdtUnionCaseTupleV0,
+				TupleCase: &xdr.ScSpecUdtUnionCaseTupleV0{
+					Name: "Transfer",
+					Type: []xdr.ScSpecTypeDef{
+						ty(xdr.ScSpecTypeScSpecTypeSymbol),
+						ty(xdr.ScSpecTypeScSpecTypeU32),
+					},
+				},
+			},
+		},
+	}
+	entry := xdr.ScSpecEntry{
+		Kind:       xdr.ScSpecEntryKindScSpecEntryUdtUnionV0,
+		UdtUnionV0: &udt,
+	}
+	s := NewSpecFromEntries([]xdr.ScSpecEntry{entry})
+	tt := xdr.ScSpecTypeDef{
+		Type: xdr.ScSpecTypeScSpecTypeUdt,
+		Udt:  &xdr.ScSpecTypeUdt{Name: "Action"},
+	}
+
+	t.Run("void case", func(t *testing.T) {
+		in := map[string]any{"tag": "Noop"}
+		got, sv := roundTrip(t, s, in, tt)
+		if sv.Type != xdr.ScValTypeScvVec {
+			t.Fatalf("expected ScvVec, got %s", sv.Type)
+		}
+		if vec := sv.MustVec(); vec == nil || len(*vec) != 1 {
+			t.Fatalf("expected vec of length 1, got %v", vec)
+		}
+		if !reflect.DeepEqual(got, in) {
+			t.Fatalf("got %#v, want %#v", got, in)
+		}
+	})
+
+	t.Run("tuple case single payload", func(t *testing.T) {
+		in := map[string]any{"tag": "Increment", "values": []any{uint32(42)}}
+		got, sv := roundTrip(t, s, in, tt)
+		if vec := sv.MustVec(); vec == nil || len(*vec) != 2 {
+			t.Fatalf("expected vec of length 2, got %v", vec)
+		}
+		if !reflect.DeepEqual(got, in) {
+			t.Fatalf("got %#v, want %#v", got, in)
+		}
+	})
+
+	t.Run("tuple case multi payload", func(t *testing.T) {
+		in := map[string]any{"tag": "Transfer", "values": []any{"to", uint32(7)}}
+		got, sv := roundTrip(t, s, in, tt)
+		if vec := sv.MustVec(); vec == nil || len(*vec) != 3 {
+			t.Fatalf("expected vec of length 3, got %v", vec)
+		}
+		if !reflect.DeepEqual(got, in) {
+			t.Fatalf("got %#v, want %#v", got, in)
+		}
+	})
+
+	t.Run("unknown tag", func(t *testing.T) {
+		_, err := s.NativeToScVal(map[string]any{"tag": "Unknown"}, tt)
+		if err == nil || !errors.Is(err, &Error{Kind: KindInvalidArgs}) {
+			t.Fatalf("expected KindInvalidArgs for unknown tag, got %v", err)
+		}
+	})
+
+	t.Run("wrong arity", func(t *testing.T) {
+		_, err := s.NativeToScVal(
+			map[string]any{"tag": "Increment", "values": []any{uint32(1), uint32(2)}}, tt)
+		if err == nil || !errors.Is(err, &Error{Kind: KindInvalidArgs}) {
+			t.Fatalf("expected KindInvalidArgs for wrong arity, got %v", err)
+		}
+	})
+
+	t.Run("wrong payload type", func(t *testing.T) {
+		_, err := s.NativeToScVal(
+			map[string]any{"tag": "Increment", "values": []any{"not-a-u32"}}, tt)
+		if err == nil || !errors.Is(err, &Error{Kind: KindInvalidArgs}) {
+			t.Fatalf("expected KindInvalidArgs for wrong payload type, got %v", err)
+		}
+	})
+
+	t.Run("void case rejects values", func(t *testing.T) {
+		_, err := s.NativeToScVal(
+			map[string]any{"tag": "Noop", "values": []any{uint32(1)}}, tt)
+		if err == nil || !errors.Is(err, &Error{Kind: KindInvalidArgs}) {
+			t.Fatalf("expected KindInvalidArgs for unexpected values, got %v", err)
+		}
+	})
+
+	t.Run("missing tag", func(t *testing.T) {
+		_, err := s.NativeToScVal(map[string]any{}, tt)
+		if err == nil || !errors.Is(err, &Error{Kind: KindInvalidArgs}) {
+			t.Fatalf("expected KindInvalidArgs for missing tag, got %v", err)
+		}
+	})
+}
+
 func TestSpecMarshalErrors(t *testing.T) {
 	s := NewSpecFromEntries(nil)
 

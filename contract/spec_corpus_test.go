@@ -22,8 +22,9 @@ import (
 // sides. If any converter regresses, this test fails alongside the targeted
 // one — giving us a single corpus to grow over time.
 //
-// Unions are intentionally not covered: a follow-up to T2.2 (P1) adds union
-// UDT support. The corpus will pick them up once that lands.
+// Unions are covered via the `Action` UDT (T2.2a): a void case plus a
+// tuple case with a single payload, exercised end-to-end through
+// FuncArgsToScVals / FuncResToNative.
 
 // addrAccount and addrContract are stable strkey fixtures reused across cases.
 const (
@@ -74,6 +75,25 @@ func corpusSpec(t *testing.T) *Spec {
 			Cases: []xdr.ScSpecUdtErrorEnumCaseV0{
 				{Name: "Unauthorized", Value: 1},
 				{Name: "InsufficientBalance", Value: 2},
+			},
+		},
+	}
+	actionUnion := xdr.ScSpecEntry{
+		Kind: xdr.ScSpecEntryKindScSpecEntryUdtUnionV0,
+		UdtUnionV0: &xdr.ScSpecUdtUnionV0{
+			Name: "Action",
+			Cases: []xdr.ScSpecUdtUnionCaseV0{
+				{
+					Kind:     xdr.ScSpecUdtUnionCaseV0KindScSpecUdtUnionCaseVoidV0,
+					VoidCase: &xdr.ScSpecUdtUnionCaseVoidV0{Name: "Noop"},
+				},
+				{
+					Kind: xdr.ScSpecUdtUnionCaseV0KindScSpecUdtUnionCaseTupleV0,
+					TupleCase: &xdr.ScSpecUdtUnionCaseTupleV0{
+						Name: "Increment",
+						Type: []xdr.ScSpecTypeDef{ty(xdr.ScSpecTypeScSpecTypeU32)},
+					},
+				},
 			},
 		},
 	}
@@ -164,9 +184,19 @@ func corpusSpec(t *testing.T) *Spec {
 	}
 	fail := fnEntryWithSig(t, "fail", nil, &errRet)
 
+	// next_action: (Action) -> Action — exercises union as both input and
+	// output through the function-level API.
+	actionTy := xdr.ScSpecTypeDef{
+		Type: xdr.ScSpecTypeScSpecTypeUdt,
+		Udt:  &xdr.ScSpecTypeUdt{Name: "Action"},
+	}
+	nextAction := fnEntryWithSig(t, "next_action", []xdr.ScSpecFunctionInputV0{
+		{Name: "a", Type: actionTy},
+	}, &actionTy)
+
 	return NewSpecFromEntries([]xdr.ScSpecEntry{
-		balanceStruct, colorEnum, tokenError,
-		allPrim, composites, balanceOf, status, fail,
+		balanceStruct, colorEnum, tokenError, actionUnion,
+		allPrim, composites, balanceOf, status, fail, nextAction,
 	})
 }
 
@@ -317,6 +347,25 @@ func TestSpecCorpus_ErrorEnumReturn(t *testing.T) {
 		got, err := s.FuncResToNative("fail", sv)
 		require.NoError(t, err)
 		require.Equal(t, name, got)
+	}
+}
+
+func TestSpecCorpus_UnionRoundTrip(t *testing.T) {
+	s := corpusSpec(t)
+
+	cases := []map[string]any{
+		{"tag": "Noop"},
+		{"tag": "Increment", "values": []any{uint32(7)}},
+	}
+	for _, in := range cases {
+		args := map[string]any{"a": in}
+		scvals, err := s.FuncArgsToScVals("next_action", args)
+		require.NoError(t, err)
+		require.Len(t, scvals, 1)
+
+		got, err := s.FuncResToNative("next_action", scvals[0])
+		require.NoError(t, err)
+		require.Equal(t, in, got)
 	}
 }
 

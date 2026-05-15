@@ -21,7 +21,13 @@ import (
 //   - UDT (struct/enum/error-enum) resolved against this Spec's entries.
 //
 // Cross-contract UDT resolution via a global registry is T2.4's job and is
-// not performed here. Union UDTs are deferred to a follow-up.
+// not performed here.
+//
+// Union UDTs (T2.2a) use the JS-SDK-compatible native shape
+// `map[string]any{"tag": "<CaseName>", "values": []any{...}}`. The wire
+// representation is an ScVec whose first element is the ScSymbol tag and
+// whose remaining elements are the tuple-case payload values (void cases
+// produce a single-element vec).
 func (s *Spec) NativeToScVal(v any, ty xdr.ScSpecTypeDef) (xdr.ScVal, error) {
 	return s.nativeToScVal(v, ty)
 }
@@ -330,8 +336,87 @@ func (s *Spec) udtToScVal(v any, name string) (xdr.ScVal, error) {
 		return enumToScVal(v, entry.UdtEnumV0)
 	case xdr.ScSpecEntryKindScSpecEntryUdtErrorEnumV0:
 		return errorEnumToScVal(v, entry.UdtErrorEnumV0)
+	case xdr.ScSpecEntryKindScSpecEntryUdtUnionV0:
+		return s.unionToScVal(v, entry.UdtUnionV0)
 	}
 	return xdr.ScVal{}, invalidArgsf("udt %q has unsupported kind %s", name, entry.Kind)
+}
+
+func (s *Spec) unionToScVal(v any, udt *xdr.ScSpecUdtUnionV0) (xdr.ScVal, error) {
+	if udt == nil {
+		return xdr.ScVal{}, invalidArgsf("union udt is nil")
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		return xdr.ScVal{}, invalidArgsf("expected map[string]any for union %q, got %T", udt.Name, v)
+	}
+	tagAny, ok := m["tag"]
+	if !ok {
+		return xdr.ScVal{}, invalidArgsf("union %q missing \"tag\" field", udt.Name)
+	}
+	tag, ok := tagAny.(string)
+	if !ok {
+		return xdr.ScVal{}, invalidArgsf("union %q \"tag\" must be string, got %T", udt.Name, tagAny)
+	}
+	for _, c := range udt.Cases {
+		switch c.Kind {
+		case xdr.ScSpecUdtUnionCaseV0KindScSpecUdtUnionCaseVoidV0:
+			if c.VoidCase == nil || c.VoidCase.Name != tag {
+				continue
+			}
+			if vs, present := m["values"]; present && !isEmptyValues(vs) {
+				return xdr.ScVal{}, invalidArgsf("union %q void case %q expects no values", udt.Name, tag)
+			}
+			key, err := xdr.ScvSymbol(tag)
+			if err != nil {
+				return xdr.ScVal{}, fmt.Errorf("union %q tag: %w", udt.Name, err)
+			}
+			return xdr.ScvVec(key), nil
+		case xdr.ScSpecUdtUnionCaseV0KindScSpecUdtUnionCaseTupleV0:
+			if c.TupleCase == nil || c.TupleCase.Name != tag {
+				continue
+			}
+			types := c.TupleCase.Type
+			var values []any
+			if vs, present := m["values"]; present {
+				vals, err := toSlice(vs)
+				if err != nil {
+					return xdr.ScVal{}, fmt.Errorf("union %q case %q values: %w", udt.Name, tag, err)
+				}
+				values = vals
+			}
+			if len(values) != len(types) {
+				return xdr.ScVal{}, invalidArgsf("union %q case %q expects %d values, got %d",
+					udt.Name, tag, len(types), len(values))
+			}
+			key, err := xdr.ScvSymbol(tag)
+			if err != nil {
+				return xdr.ScVal{}, fmt.Errorf("union %q tag: %w", udt.Name, err)
+			}
+			out := make([]xdr.ScVal, 0, len(values)+1)
+			out = append(out, key)
+			for i, val := range values {
+				ev, err := s.nativeToScVal(val, types[i])
+				if err != nil {
+					return xdr.ScVal{}, fmt.Errorf("union %q case %q values[%d]: %w", udt.Name, tag, i, err)
+				}
+				out = append(out, ev)
+			}
+			return xdr.ScvVec(out...), nil
+		}
+	}
+	return xdr.ScVal{}, invalidArgsf("union %q has no case %q", udt.Name, tag)
+}
+
+func isEmptyValues(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array {
+		return rv.Len() == 0
+	}
+	return false
 }
 
 func (s *Spec) structToScVal(v any, udt *xdr.ScSpecUdtStructV0) (xdr.ScVal, error) {
@@ -695,8 +780,63 @@ func (s *Spec) udtFromScVal(v xdr.ScVal, name string) (any, error) {
 		return enumFromScVal(v, entry.UdtEnumV0)
 	case xdr.ScSpecEntryKindScSpecEntryUdtErrorEnumV0:
 		return errorEnumFromScVal(v, entry.UdtErrorEnumV0)
+	case xdr.ScSpecEntryKindScSpecEntryUdtUnionV0:
+		return s.unionFromScVal(v, entry.UdtUnionV0)
 	}
 	return nil, invalidArgsf("udt %q has unsupported kind %s", name, entry.Kind)
+}
+
+func (s *Spec) unionFromScVal(v xdr.ScVal, udt *xdr.ScSpecUdtUnionV0) (any, error) {
+	if udt == nil {
+		return nil, invalidArgsf("union udt is nil")
+	}
+	if v.Type != xdr.ScValTypeScvVec {
+		return nil, invalidArgsf("expected ScvVec for union %q, got %s", udt.Name, v.Type)
+	}
+	vec := v.MustVec()
+	var items []xdr.ScVal
+	if vec != nil {
+		items = *vec
+	}
+	if len(items) == 0 {
+		return nil, invalidArgsf("union %q has empty vec", udt.Name)
+	}
+	if items[0].Type != xdr.ScValTypeScvSymbol {
+		return nil, invalidArgsf("union %q tag must be ScvSymbol, got %s", udt.Name, items[0].Type)
+	}
+	tag := string(*items[0].Sym)
+	for _, c := range udt.Cases {
+		switch c.Kind {
+		case xdr.ScSpecUdtUnionCaseV0KindScSpecUdtUnionCaseVoidV0:
+			if c.VoidCase == nil || c.VoidCase.Name != tag {
+				continue
+			}
+			if len(items) != 1 {
+				return nil, invalidArgsf("union %q void case %q has %d extra values",
+					udt.Name, tag, len(items)-1)
+			}
+			return map[string]any{"tag": tag}, nil
+		case xdr.ScSpecUdtUnionCaseV0KindScSpecUdtUnionCaseTupleV0:
+			if c.TupleCase == nil || c.TupleCase.Name != tag {
+				continue
+			}
+			types := c.TupleCase.Type
+			if len(items)-1 != len(types) {
+				return nil, invalidArgsf("union %q case %q expects %d values, got %d",
+					udt.Name, tag, len(types), len(items)-1)
+			}
+			values := make([]any, len(types))
+			for i, t := range types {
+				val, err := s.scValToNative(items[i+1], t)
+				if err != nil {
+					return nil, fmt.Errorf("union %q case %q values[%d]: %w", udt.Name, tag, i, err)
+				}
+				values[i] = val
+			}
+			return map[string]any{"tag": tag, "values": values}, nil
+		}
+	}
+	return nil, invalidArgsf("union %q has no case %q", udt.Name, tag)
 }
 
 func (s *Spec) structFromScVal(v xdr.ScVal, udt *xdr.ScSpecUdtStructV0) (any, error) {
