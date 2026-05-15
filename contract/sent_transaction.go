@@ -34,9 +34,15 @@ type SentTransaction struct {
 	SendResponse *protocol.SendTransactionResponse
 
 	// unexported state. rpc and method are set by Send so the Wait / Watch /
-	// Status methods can issue follow-up getTransaction calls.
-	rpc    rpcSimulator
-	method string
+	// Status methods can issue follow-up getTransaction calls. spec, when
+	// non-nil, lets Result() decode the final ScVal via the contract's
+	// declared output type. getResp caches the terminal getTransaction
+	// response produced by Wait so AssembledTransaction.Result() can decode
+	// it without re-polling the network.
+	rpc     rpcSimulator
+	method  string
+	spec    *Spec
+	getResp *protocol.GetTransactionResponse
 }
 
 // pollConfig captures the knobs exposed by the PollOption functional options.
@@ -163,7 +169,9 @@ func (s *SentTransaction) Wait(ctx context.Context, opts ...PollOption) (*protoc
 
 		switch resp.Status {
 		case protocol.TransactionStatusSuccess:
-			return &resp, nil
+			respCopy := resp
+			s.getResp = &respCopy
+			return &respCopy, nil
 		case protocol.TransactionStatusFailed:
 			return &resp, &Error{
 				Kind:    KindTransactionFailed,

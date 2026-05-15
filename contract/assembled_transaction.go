@@ -74,6 +74,7 @@ type AssembledTransaction struct {
 	memo                  txnbuild.Memo
 	preconditions         txnbuild.Preconditions
 	resourceFeeMultiplier float64
+	spec                  *Spec
 
 	// sent caches the result of a successful Send so subsequent Send calls
 	// are no-ops (JS parity: AssembledTransaction.send is idempotent).
@@ -108,6 +109,10 @@ type AssembleParams struct {
 	// ResourceFeeMultiplier overrides DefaultResourceFeeMultiplier for this
 	// transaction. Values <= 0 fall back to the default.
 	ResourceFeeMultiplier float64
+	// Spec is the optional contract Spec used by Result() to decode the
+	// returned ScVal into a native Go value. When nil, Result() returns the
+	// raw xdr.ScVal.
+	Spec *Spec
 }
 
 // NewAssembledTransaction validates params, builds the initial
@@ -155,6 +160,7 @@ func NewAssembledTransaction(params AssembleParams) (*AssembledTransaction, erro
 		memo:                  params.Memo,
 		preconditions:         params.Preconditions,
 		resourceFeeMultiplier: mult,
+		spec:                  params.Spec,
 	}, nil
 }
 
@@ -225,6 +231,7 @@ func (a *AssembledTransaction) Send(ctx context.Context) (*SentTransaction, erro
 		SendResponse: &resp,
 		rpc:          a.rpc,
 		method:       a.Method,
+		spec:         a.spec,
 	}
 	a.sent = sent
 	return sent, nil
