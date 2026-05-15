@@ -96,6 +96,55 @@ func TestRun_GarbageWasm(t *testing.T) {
 	}
 }
 
+// TestRun_FromWasm_WithContractID exercises T8.3 end-to-end: when -contract-id
+// is supplied, the emitted package's init() registers the spec under that id
+// via contract.RegisterSpec, so importing it for its side effects is enough
+// for contract.LookupSpec to find it.
+func TestRun_FromWasm_WithContractID(t *testing.T) {
+	const cid = "CA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJUWDA"
+	wasm := buildWasm(t, "contractspecv0", encodeEntries(t, []xdr.ScSpecEntry{fnEntry(t, "transfer")}))
+	dir := t.TempDir()
+	wasmPath := filepath.Join(dir, "c.wasm")
+	if err := os.WriteFile(wasmPath, wasm, 0o644); err != nil {
+		t.Fatalf("seed wasm: %v", err)
+	}
+	outDir := filepath.Join(dir, "out")
+
+	if err := run([]string{"-wasm", wasmPath, "-out", outDir, "-package", "token", "-contract-id", cid}, io.Discard); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	got, err := os.ReadFile(outputFilePath(outDir, "token"))
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	body := string(got)
+	want := `contract.RegisterSpec("` + cid + `", s)`
+	if !strings.Contains(body, want) {
+		t.Errorf("expected emitted RegisterSpec call, got:\n%s", body)
+	}
+}
+
+// TestRun_InvalidContractID asserts the CLI rejects -contract-id values that
+// aren't strkey-shaped contract addresses, so we fail fast at generation
+// rather than emitting a binding that registers under a bogus key.
+func TestRun_InvalidContractID(t *testing.T) {
+	dir := t.TempDir()
+	wasm := buildWasm(t, "contractspecv0", encodeEntries(t, []xdr.ScSpecEntry{fnEntry(t, "transfer")}))
+	wasmPath := filepath.Join(dir, "c.wasm")
+	if err := os.WriteFile(wasmPath, wasm, 0o644); err != nil {
+		t.Fatalf("seed wasm: %v", err)
+	}
+
+	err := run([]string{"-wasm", wasmPath, "-out", filepath.Join(dir, "out"), "-package", "token", "-contract-id", "not-a-strkey"}, io.Discard)
+	if err == nil {
+		t.Fatal("expected error for invalid contract id")
+	}
+	if !strings.Contains(err.Error(), "contract-id") {
+		t.Errorf("error %q does not mention contract-id", err)
+	}
+}
+
 func TestRun_FlagValidation(t *testing.T) {
 	dir := t.TempDir()
 	cases := []struct {

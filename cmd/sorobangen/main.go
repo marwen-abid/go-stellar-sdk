@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 
 	"github.com/stellar/go-stellar-sdk/contract"
+	"github.com/stellar/go-stellar-sdk/strkey"
 )
 
 // options collects the parsed command-line flags. Kept as a struct so
@@ -28,6 +29,7 @@ type options struct {
 	specPath    string
 	outDir      string
 	packageName string
+	contractID  string
 }
 
 func main() {
@@ -59,6 +61,7 @@ func run(args []string, errOut io.Writer) error {
 	fs.StringVar(&opts.specPath, "spec", "", "path to a raw XDR ScSpecEntry stream (alternative to -wasm)")
 	fs.StringVar(&opts.outDir, "out", "", "output directory for the generated package (required)")
 	fs.StringVar(&opts.packageName, "package", "", "Go package name for the generated code (required)")
+	fs.StringVar(&opts.contractID, "contract-id", "", "deployed contract strkey (C...); when set, the generated init() registers the spec under this id via contract.RegisterSpec")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -74,7 +77,7 @@ func run(args []string, errOut io.Writer) error {
 		return err
 	}
 
-	if err := emit(opts.outDir, opts.packageName, spec); err != nil {
+	if err := emit(opts.outDir, opts.packageName, opts.contractID, spec); err != nil {
 		return fmt.Errorf("emitting bindings: %w", err)
 	}
 	return nil
@@ -90,6 +93,9 @@ func (o options) validate() error {
 		return errors.New("-out is required")
 	case o.packageName == "":
 		return errors.New("-package is required")
+	}
+	if o.contractID != "" && !strkey.IsValidContractAddress(o.contractID) {
+		return fmt.Errorf("-contract-id %q is not a valid contract strkey (must start with 'C')", o.contractID)
 	}
 	return nil
 }

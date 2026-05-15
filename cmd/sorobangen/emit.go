@@ -16,13 +16,17 @@ import (
 // per-function method wrappers, and a package-level Spec() accessor backed by
 // an embedded base64 dump of the source spec.
 //
+// When contractID is non-empty (the caller passed -contract-id), the emitted
+// init() additionally calls contract.RegisterSpec so that importing the
+// generated package — e.g. `import _ "myproj/bindings/usdc"` — makes the spec
+// globally discoverable via contract.LookupSpec. When contractID is empty
+// (e.g. -wasm without -contract-id), only the Spec() accessor is emitted and
+// consumers must register manually if they want registry-based lookup.
+//
 // The output passes through go/format.Source, so the on-disk text is
 // gofmt-clean. If formatting fails (which would imply a bug in this emitter),
 // the unformatted source is still written so the failure is debuggable.
-//
-// T8.3 will populate the init() body with contract.RegisterSpec /
-// events.RegisterDecoder calls; this emitter leaves a TODO comment as a hook.
-func emit(outDir, packageName string, spec *contract.Spec) error {
+func emit(outDir, packageName, contractID string, spec *contract.Spec) error {
 	if spec == nil {
 		return fmt.Errorf("nil spec")
 	}
@@ -30,7 +34,7 @@ func emit(outDir, packageName string, spec *contract.Spec) error {
 		return fmt.Errorf("creating output dir: %w", err)
 	}
 
-	src, err := renderPackage(packageName, spec)
+	src, err := renderPackage(packageName, contractID, spec)
 	if err != nil {
 		return err
 	}
@@ -44,8 +48,9 @@ func emit(outDir, packageName string, spec *contract.Spec) error {
 
 // renderPackage assembles the generated source as raw bytes and runs them
 // through go/format.Source. The packageName is trusted; the CLI's flag
-// validation rejects empty values upstream.
-func renderPackage(packageName string, spec *contract.Spec) ([]byte, error) {
+// validation rejects empty values upstream. contractID, when non-empty, is
+// embedded in the generated init() as a contract.RegisterSpec call argument.
+func renderPackage(packageName, contractID string, spec *contract.Spec) ([]byte, error) {
 	imps := newImportSet()
 
 	// Render each entry first so we know which imports are needed.
@@ -132,12 +137,12 @@ func renderPackage(packageName string, spec *contract.Spec) ([]byte, error) {
 	b.WriteString("\t\tpanic(\"sorobangen: failed to decode embedded spec: \" + err.Error())\n")
 	b.WriteString("\t}\n")
 	b.WriteString("\tpkgSpec = s\n")
-	b.WriteString("\t// TODO(T8.3): wire registry registration here:\n")
-	b.WriteString("\t//   contract.RegisterSpec(contractID, s)\n")
-	b.WriteString("\t//   events.RegisterDecoder(contractID, eventName, decoder)\n")
-	b.WriteString("\t// The generated package does not know its deployed contractID; T8.3\n")
-	b.WriteString("\t// will surface a generation-time flag (`--contract-id`) and emit the\n")
-	b.WriteString("\t// call site here.\n")
+	if contractID != "" {
+		b.WriteString("\t// Register under the deployed contract id so callers can resolve the\n")
+		b.WriteString("\t// spec via contract.LookupSpec without holding a reference to this\n")
+		b.WriteString("\t// package. Importing the package for its side effects is enough.\n")
+		fmt.Fprintf(&b, "\tcontract.RegisterSpec(%q, s)\n", contractID)
+	}
 	b.WriteString("}\n\n")
 
 	// Client wrapper. The struct embeds *contract.Client behind an unexported

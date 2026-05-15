@@ -35,7 +35,7 @@ func TestRenderPackage_ParsesAsGo(t *testing.T) {
 		}),
 	})
 
-	src, err := renderPackage("token", spec)
+	src, err := renderPackage("token", "", spec)
 	if err != nil {
 		t.Fatalf("renderPackage: %v", err)
 	}
@@ -54,7 +54,6 @@ func TestRenderPackage_ParsesAsGo(t *testing.T) {
 		"type Error uint32",
 		"func (e Error) Error() string",
 		"func Spec() *contract.Spec",
-		"TODO(T8.3)",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing %q in generated source:\n%s", want, body)
@@ -68,7 +67,7 @@ func TestRenderPackage_ParsesAsGo(t *testing.T) {
 // pipelines that codegen-then-build don't fail on stub specs.
 func TestRenderPackage_EmptySpec(t *testing.T) {
 	spec := contract.NewSpecFromEntries(nil)
-	src, err := renderPackage("empty", spec)
+	src, err := renderPackage("empty", "", spec)
 	if err != nil {
 		t.Fatalf("renderPackage: %v", err)
 	}
@@ -98,7 +97,7 @@ func TestRenderPackage_RoundTripsSpec(t *testing.T) {
 		}, []xdr.ScSpecTypeDef{simpleType(xdr.ScSpecTypeScSpecTypeI128)}),
 	}
 	spec := contract.NewSpecFromEntries(entries)
-	src, err := renderPackage("tok", spec)
+	src, err := renderPackage("tok", "", spec)
 	if err != nil {
 		t.Fatalf("renderPackage: %v", err)
 	}
@@ -127,6 +126,50 @@ func TestRenderPackage_RoundTripsSpec(t *testing.T) {
 	}
 	if got := len(decoded.Entries()); got != len(entries) {
 		t.Fatalf("round-trip entry count: got %d want %d", got, len(entries))
+	}
+}
+
+// TestRenderPackage_RegistersSpecWhenContractIDSet verifies T8.3: passing a
+// contract id at generation time causes the emitted init() to call
+// contract.RegisterSpec under that id. Importing the generated package then
+// becomes sufficient to make the spec discoverable via contract.LookupSpec at
+// runtime.
+func TestRenderPackage_RegistersSpecWhenContractIDSet(t *testing.T) {
+	const cid = "CA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJUWDA"
+	spec := contract.NewSpecFromEntries([]xdr.ScSpecEntry{
+		mustFnEntry(t, "transfer", nil, nil),
+	})
+	src, err := renderPackage("usdc", cid, spec)
+	if err != nil {
+		t.Fatalf("renderPackage: %v", err)
+	}
+
+	fset := token.NewFileSet()
+	if _, err := parser.ParseFile(fset, "usdc.go", src, parser.ParseComments); err != nil {
+		t.Fatalf("generated source does not parse: %v\n--- source ---\n%s", err, src)
+	}
+
+	body := string(src)
+	want := `contract.RegisterSpec("` + cid + `", s)`
+	if !strings.Contains(body, want) {
+		t.Errorf("missing %q in generated source:\n%s", want, body)
+	}
+}
+
+// TestRenderPackage_NoRegistrationWhenContractIDEmpty asserts that, absent a
+// contract id, the emitted init() body sticks to populating pkgSpec and does
+// not reference RegisterSpec. Consumers who didn't supply -contract-id at
+// generation time are responsible for manual registration if they need it.
+func TestRenderPackage_NoRegistrationWhenContractIDEmpty(t *testing.T) {
+	spec := contract.NewSpecFromEntries([]xdr.ScSpecEntry{
+		mustFnEntry(t, "transfer", nil, nil),
+	})
+	src, err := renderPackage("usdc", "", spec)
+	if err != nil {
+		t.Fatalf("renderPackage: %v", err)
+	}
+	if strings.Contains(string(src), "RegisterSpec(") {
+		t.Errorf("expected no RegisterSpec call when contract id is empty:\n%s", src)
 	}
 }
 
