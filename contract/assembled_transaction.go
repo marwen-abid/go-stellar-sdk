@@ -362,6 +362,10 @@ func (a *AssembledTransaction) simulateOnce(ctx context.Context) error {
 		return &Error{Kind: KindSimulationFailed, cause: err}
 	}
 	if resp.Error != "" {
+		if code, ok := parseContractRevert(resp.Error); ok {
+			rev := newContractRevertError(a.spec, contractIDFromOp(a.op), code)
+			return &Error{Kind: KindContractRevert, Details: resp.Error, cause: rev}
+		}
 		return &Error{Kind: KindSimulationFailed, Details: resp.Error}
 	}
 	if resp.RestorePreamble != nil {

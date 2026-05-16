@@ -1,6 +1,10 @@
 package contract
 
-import "fmt"
+import (
+	"fmt"
+	"regexp"
+	"strconv"
+)
 
 // ErrorKind classifies an *Error so callers can branch on the lifecycle stage
 // or invariant that produced it without inspecting message strings.
@@ -167,3 +171,42 @@ var (
 	_ error = (*Error)(nil)
 	_ error = (*ContractRevertError)(nil)
 )
+
+// contractRevertPattern matches the "Error(Contract, #N)" fragment that
+// soroban-rpc embeds in the SimulateTransactionResponse.Error string when a
+// contract returns Result::Err or panics with a #[contracterror] code. It
+// mirrors the regex used by the JS SDK so the two stay behaviourally aligned.
+var contractRevertPattern = regexp.MustCompile(`Error\(Contract, #(\d+)\)`)
+
+// parseContractRevert inspects a simulation-error string and, when it carries
+// an "Error(Contract, #N)" fragment, returns (N, true). Otherwise it returns
+// (0, false). The fragment is the canonical way the Soroban host surfaces a
+// user-defined #[contracterror] code through the JSON-RPC error channel.
+func parseContractRevert(msg string) (int32, bool) {
+	m := contractRevertPattern.FindStringSubmatch(msg)
+	if m == nil {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(m[1], 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	return int32(n), true
+}
+
+// newContractRevertError builds a *ContractRevertError for code, resolving its
+// Name against the spec's ErrorCases() when available. spec and contractID may
+// be empty/nil — callers will still receive a usefully formatted error.
+func newContractRevertError(spec *Spec, contractID string, code int32) *ContractRevertError {
+	rev := &ContractRevertError{ContractID: contractID, Code: code}
+	if spec == nil {
+		return rev
+	}
+	for _, c := range spec.ErrorCases() {
+		if int32(c.Value) == code {
+			rev.Name = c.Name
+			break
+		}
+	}
+	return rev
+}

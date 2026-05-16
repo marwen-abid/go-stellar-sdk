@@ -371,6 +371,56 @@ func TestAssembledTransaction_Simulate_ResponseErrorWrapsSentinel(t *testing.T) 
 	assert.Contains(t, err.Error(), "host fn trapped")
 }
 
+func TestAssembledTransaction_Simulate_ContractRevert_NoSpec(t *testing.T) {
+	rpc := &fakeSimulator{
+		resp: protocol.SimulateTransactionResponse{
+			Error: "host invocation failed: HostError: Error(Contract, #13)",
+		},
+	}
+	at, err := NewAssembledTransaction(newAssembleParams(t, rpc))
+	require.NoError(t, err)
+
+	err = at.Simulate(context.Background())
+	require.Error(t, err)
+
+	// Must classify as KindContractRevert, not KindSimulationFailed.
+	var e *Error
+	require.True(t, errors.As(err, &e))
+	assert.Equal(t, KindContractRevert, e.Kind)
+
+	// The typed cause must be extractable.
+	var rev *ContractRevertError
+	require.True(t, errors.As(err, &rev))
+	assert.Equal(t, int32(13), rev.Code)
+	assert.Empty(t, rev.Name, "no spec attached so Name remains empty")
+	// ContractID resolves from the InvokeContract op.
+	assert.NotEmpty(t, rev.ContractID)
+}
+
+func TestAssembledTransaction_Simulate_ContractRevert_ResolvesNameFromSpec(t *testing.T) {
+	spec := NewSpecFromEntries([]xdr.ScSpecEntry{
+		errorEnumEntry(t, "Error", "NotAuthorized", "InsufficientBalance", "Overflow"),
+	})
+	// errorEnumEntry assigns values starting at 1; #2 → InsufficientBalance.
+	rpc := &fakeSimulator{
+		resp: protocol.SimulateTransactionResponse{
+			Error: "Error(Contract, #2)",
+		},
+	}
+	p := newAssembleParams(t, rpc)
+	p.Spec = spec
+	at, err := NewAssembledTransaction(p)
+	require.NoError(t, err)
+
+	err = at.Simulate(context.Background())
+	require.Error(t, err)
+
+	var rev *ContractRevertError
+	require.True(t, errors.As(err, &rev))
+	assert.Equal(t, int32(2), rev.Code)
+	assert.Equal(t, "InsufficientBalance", rev.Name)
+}
+
 func TestAssembledTransaction_Simulate_RestorePreambleSurfaced(t *testing.T) {
 	rpc := &fakeSimulator{
 		resp: protocol.SimulateTransactionResponse{

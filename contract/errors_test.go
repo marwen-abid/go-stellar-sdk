@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stellar/go-stellar-sdk/xdr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -323,4 +324,75 @@ func TestError_RevertIntegration_FullChain(t *testing.T) {
 	require.Contains(t, msg, "contract_revert")
 	require.Contains(t, msg, "invoke transfer")
 	require.Contains(t, msg, "ErrOverflow")
+}
+
+// --- parseContractRevert ----------------------------------------------------
+
+func TestParseContractRevert_MatchesHostFormat(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want int32
+	}{
+		{"bareFragment", "Error(Contract, #13)", 13},
+		{"embeddedInHostMsg", "host invocation failed: HostError: Error(Contract, #7)\n  Backtrace: ...", 7},
+		{"zeroCode", "Error(Contract, #0)", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parseContractRevert(tc.in)
+			require.True(t, ok)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestParseContractRevert_NoMatch(t *testing.T) {
+	cases := []string{
+		"",
+		"host fn trapped",
+		"Error(WasmVm, #1)",
+		"Contract returned an error",
+		"Error(Contract, #abc)",
+	}
+	for _, s := range cases {
+		_, ok := parseContractRevert(s)
+		require.False(t, ok, "string %q should not parse", s)
+	}
+}
+
+func TestParseContractRevert_RejectsOverflow(t *testing.T) {
+	// A code beyond uint32 must not parse; production hosts only emit uint32
+	// contract codes.
+	_, ok := parseContractRevert("Error(Contract, #99999999999)")
+	require.False(t, ok)
+}
+
+// --- newContractRevertError -------------------------------------------------
+
+func TestNewContractRevertError_NilSpecLeavesNameEmpty(t *testing.T) {
+	rev := newContractRevertError(nil, "CABC", 13)
+	require.Equal(t, "CABC", rev.ContractID)
+	require.Equal(t, int32(13), rev.Code)
+	require.Empty(t, rev.Name)
+}
+
+func TestNewContractRevertError_ResolvesNameFromSpec(t *testing.T) {
+	spec := NewSpecFromEntries([]xdr.ScSpecEntry{
+		errorEnumEntry(t, "Error", "NotAuthorized", "InsufficientBalance", "Overflow"),
+	})
+	// errorEnumEntry assigns values starting at 1, so case index 1 has value 2.
+	rev := newContractRevertError(spec, "CDEF", 2)
+	require.Equal(t, "InsufficientBalance", rev.Name)
+	require.Equal(t, int32(2), rev.Code)
+	require.Equal(t, "CDEF", rev.ContractID)
+}
+
+func TestNewContractRevertError_UnknownCodeLeavesNameEmpty(t *testing.T) {
+	spec := NewSpecFromEntries([]xdr.ScSpecEntry{
+		errorEnumEntry(t, "Error", "OnlyCase"),
+	})
+	rev := newContractRevertError(spec, "", 99)
+	require.Empty(t, rev.Name, "no case has value 99")
+	require.Equal(t, int32(99), rev.Code)
 }
