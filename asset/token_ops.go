@@ -233,10 +233,16 @@ func (t *Token) Approve(
 	return t.client.Invoke(ctx, "approve", []xdr.ScVal{fromScv, spenderScv, amountScv, expScv}, callOpts...)
 }
 
-// SetAuthorized invokes the SAC `set_authorized(admin, id, authorize)` admin
+// SetAuthorized invokes the SAC `set_authorized(id, authorize)` admin
 // function, flipping the authorization flag for `id`. The returned
 // *contract.AssembledTransaction must be SignAndSend-ed by the token admin to
 // take effect.
+//
+// `admin` is not sent as a positional argument — the SAC spec accepts only
+// `(id, authorize)`. It is still required so the wrapper can default the
+// transaction Source to the admin G-address when one is supplied; the
+// on-chain auth check is satisfied by the admin's signature on the envelope
+// (or by an explicit contract.WithInvokeSigner override).
 func (t *Token) SetAuthorized(
 	ctx context.Context,
 	admin, id string,
@@ -246,8 +252,7 @@ func (t *Token) SetAuthorized(
 	if err := t.checkClient("SetAuthorized"); err != nil {
 		return nil, err
 	}
-	adminScv, err := xdr.ScvAddress(admin)
-	if err != nil {
+	if _, err := xdr.ScvAddress(admin); err != nil {
 		return nil, fmt.Errorf("%w: SetAuthorized: encode admin: %v", ErrInvalidTokenOpArg, err)
 	}
 	idScv, err := xdr.ScvAddress(id)
@@ -260,7 +265,7 @@ func (t *Token) SetAuthorized(
 		callOpts = append(callOpts, contract.Source(admin))
 	}
 	callOpts = append(callOpts, opts...)
-	return t.client.Invoke(ctx, "set_authorized", []xdr.ScVal{adminScv, idScv, authScv}, callOpts...)
+	return t.client.Invoke(ctx, "set_authorized", []xdr.ScVal{idScv, authScv}, callOpts...)
 }
 
 // checkClient guards every Token operation against a nil receiver or

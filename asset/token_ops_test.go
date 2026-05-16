@@ -257,17 +257,29 @@ func TestSetAuthorized_BuildsInvokeContractOp(t *testing.T) {
 		t.Fatalf("SetAuthorized: %v", err)
 	}
 	method, args := decodeInvokeFn(t, got.lastEnvelope)
-	if method != "set_authorized" || len(args) != 3 {
-		t.Fatalf("method=%q args=%+v, want set_authorized/3 args", method, args)
+
+	// Arity is asserted against the bundled SAC spec rather than a literal —
+	// the on-chain SAC's set_authorized takes (id, authorize); a stale literal
+	// here is exactly how the original three-arg drift (W§3.A.3) went
+	// unnoticed.
+	wantArity := -1
+	for _, fn := range SACSpec().Funcs() {
+		if string(fn.Name) == "set_authorized" {
+			wantArity = len(fn.Inputs)
+			break
+		}
 	}
-	if scAddrStrkey(t, args[0]) != gAddrA {
-		t.Fatalf("admin arg = %q, want %q", scAddrStrkey(t, args[0]), gAddrA)
+	if wantArity < 0 {
+		t.Fatalf("SACSpec missing set_authorized function entry")
 	}
-	if scAddrStrkey(t, args[1]) != gAddrB {
-		t.Fatalf("id arg = %q, want %q", scAddrStrkey(t, args[1]), gAddrB)
+	if method != "set_authorized" || len(args) != wantArity {
+		t.Fatalf("method=%q args=%+v, want set_authorized/%d args", method, args, wantArity)
 	}
-	if args[2].Type != xdr.ScValTypeScvBool || args[2].B == nil || *args[2].B != true {
-		t.Fatalf("authorize arg = %+v, want bool(true)", args[2])
+	if scAddrStrkey(t, args[0]) != gAddrB {
+		t.Fatalf("id arg = %q, want %q", scAddrStrkey(t, args[0]), gAddrB)
+	}
+	if args[1].Type != xdr.ScValTypeScvBool || args[1].B == nil || *args[1].B != true {
+		t.Fatalf("authorize arg = %+v, want bool(true)", args[1])
 	}
 }
 
