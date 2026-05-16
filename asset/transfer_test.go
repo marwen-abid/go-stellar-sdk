@@ -254,8 +254,19 @@ func newSimulateServer(t *testing.T, captured *capturedSimReq) *httptest.Server 
 // accountLookupResponse builds a GetLedgerEntriesResponse that satisfies
 // rpcclient.LoadAccount for the AccountId encoded in the request's first
 // key. The returned SimpleAccount uses sequence 0; tests that care about
-// the live sequence number should build their own response.
+// the live sequence number should call accountLookupResponseAtSeq.
 func accountLookupResponse(t *testing.T, req protocol.GetLedgerEntriesRequest) protocol.GetLedgerEntriesResponse {
+	t.Helper()
+	return accountLookupResponseAtSeq(t, req, 0)
+}
+
+// accountLookupResponseAtSeq is the seq-parameterized form of
+// accountLookupResponse. The fake reports `seq` as the on-chain sequence
+// of the requested account; the SDK is contractually required to bump
+// this by exactly one before signing the next transaction. The asset
+// token_e2e_test.go fakeRPCRouter uses this to assert that submitted
+// envelopes carry seq+1 (the W§3.A.1 regression check).
+func accountLookupResponseAtSeq(t *testing.T, req protocol.GetLedgerEntriesRequest, seq int64) protocol.GetLedgerEntriesResponse {
 	t.Helper()
 	if len(req.Keys) == 0 {
 		t.Fatalf("getLedgerEntries: missing keys")
@@ -271,7 +282,7 @@ func accountLookupResponse(t *testing.T, req protocol.GetLedgerEntriesRequest) p
 		Type: xdr.LedgerEntryTypeAccount,
 		Account: &xdr.AccountEntry{
 			AccountId: key.Account.AccountId,
-			SeqNum:    0,
+			SeqNum:    xdr.SequenceNumber(seq),
 		},
 	}
 	dataB64, err := xdr.MarshalBase64(entry)

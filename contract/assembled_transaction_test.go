@@ -2,6 +2,7 @@ package contract
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"testing"
 
@@ -19,6 +20,11 @@ import (
 // it can serve Send-step tests; the send fields stay zero-valued for the
 // pure-simulate tests in this file.
 type fakeSimulator struct {
+	// t, when set, lets the fake fail the surrounding test directly from
+	// inside SendTransaction (used by the wantSendSeq seam below). Tests
+	// that don't enable the seq check leave it unset.
+	t *testing.T
+
 	gotReq protocol.SimulateTransactionRequest
 	calls  int
 	resp   protocol.SimulateTransactionResponse
@@ -29,6 +35,15 @@ type fakeSimulator struct {
 	sendCalls  int
 	sendResp   protocol.SendTransactionResponse
 	sendErr    error
+
+	// wantSendSeq, when non-zero, makes SendTransaction decode the submitted
+	// envelope and t.Fatalf unless tx.SeqNum matches. This is the contract
+	// counterpart of asset.fakeRPCRouter.assertSubmittedSeq: it gives
+	// integration tests a hermetic seam that catches the Soroban-write
+	// TxBadSeq regression (W§3.A.1) before it reaches a real RPC. Zero leaves
+	// the check disabled so existing unit tests that don't care about seqs
+	// keep working untouched.
+	wantSendSeq int64
 
 	// get-side state (used by sent_transaction_test.go). When getRespSeq is
 	// non-empty it is consumed one entry per call; otherwise getResp / getErr
@@ -62,6 +77,21 @@ func (f *fakeSimulator) SimulateTransaction(_ context.Context, req protocol.Simu
 func (f *fakeSimulator) SendTransaction(_ context.Context, req protocol.SendTransactionRequest) (protocol.SendTransactionResponse, error) {
 	f.gotSendReq = req
 	f.sendCalls++
+	if f.t != nil && f.wantSendSeq != 0 {
+		f.t.Helper()
+		raw, err := base64.StdEncoding.DecodeString(req.Transaction)
+		if err != nil {
+			f.t.Fatalf("fakeSimulator.SendTransaction: base64 decode envelope: %v", err)
+		}
+		var env xdr.TransactionEnvelope
+		if err := env.UnmarshalBinary(raw); err != nil {
+			f.t.Fatalf("fakeSimulator.SendTransaction: unmarshal envelope: %v", err)
+		}
+		if got := env.SeqNum(); got != f.wantSendSeq {
+			f.t.Fatalf("submitted tx.SeqNum = %d, want %d — Soroban-write TxBadSeq regression (W§3.A.1)",
+				got, f.wantSendSeq)
+		}
+	}
 	return f.sendResp, f.sendErr
 }
 

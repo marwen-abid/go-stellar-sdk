@@ -27,6 +27,7 @@ package asset
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"math/big"
 	"net/http"
@@ -206,6 +207,49 @@ func TestToken_MintThenBalance_E2E(t *testing.T) {
 	)
 }
 
+// ----- W§3.A.1 hermetic regression: submitted seq must be on-chain + 1 ---
+//
+// TestToken_TransferSubmitsLoadSeqPlusOne is the asset-layer counterpart to
+// contract.TestWithSource_BuiltTxCarriesIncrementedSeq. It threads a
+// non-zero on-chain sequence through the same getLedgerEntries path that
+// production code drives via rpc.LoadAccount, then drives a full Transfer
+// → SignAndSend through the fake router. If a future change to
+// resolveSource (or anywhere upstream of signing) drops the seq bump, the
+// router's assertSubmittedSeq fails the test deterministically — before
+// any user discovers it as TxBadSeq on testnet.
+func TestToken_TransferSubmitsLoadSeqPlusOne(t *testing.T) {
+	router := newFakeRPCRouter(t)
+	router.loadSeq = 4242
+	router.simResp = writeCallSimResponse(t)
+	router.sendResp = pendingSendResponse(t, "33")
+	router.getResp = successGetResponse(t, voidScv())
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+	rpc := rpcclient.NewClient(server.URL, nil)
+	defer rpc.Close()
+
+	tok := newE2ETestToken(t, rpc, keypair.MustRandom())
+
+	at, err := tok.Transfer(context.Background(), gAddrA, cAddr, big.NewInt(1_000_000))
+	if err != nil {
+		t.Fatalf("Transfer: %v", err)
+	}
+	sent, err := at.SignAndSend(context.Background(), tok.Signer())
+	if err != nil {
+		t.Fatalf("SignAndSend: %v", err)
+	}
+	if _, err := sent.Wait(
+		context.Background(),
+		contract.PollInterval(time.Millisecond),
+		contract.PollTimeout(2*time.Second),
+	); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	// Sequence assertion already happened inside assertSubmittedSeq during
+	// sendTransaction; reaching this line means tx.SeqNum == 4243.
+}
+
 // ----- helpers -----------------------------------------------------------
 
 // newE2ETestToken builds a SAC Token wired to the given RPC and a fresh
@@ -238,6 +282,14 @@ type fakeRPCRouter struct {
 	mu          sync.Mutex
 	methodCalls []string
 	simEnvelope string
+
+	// loadSeq is the on-chain sequence the fake getLedgerEntries handler
+	// reports for any account lookup. The SDK must bump this by exactly one
+	// before signing — sendTransaction below decodes the submitted envelope
+	// and fails the test if tx.SeqNum != loadSeq+1. Pre-W§3.A.1 the SDK
+	// reused the on-chain value verbatim, so this assertion is the
+	// hermetic regression seam for the Soroban-write TxBadSeq class of bug.
+	loadSeq int64
 
 	simResp  protocol.SimulateTransactionResponse
 	sendResp protocol.SendTransactionResponse
@@ -276,6 +328,11 @@ func (r *fakeRPCRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		r.mu.Unlock()
 		result = r.simResp
 	case protocol.SendTransactionMethodName:
+		var p protocol.SendTransactionRequest
+		if err := json.Unmarshal(raw.Params, &p); err != nil {
+			r.t.Fatalf("decode sendTransaction params: %v", err)
+		}
+		r.assertSubmittedSeq(p.Transaction)
 		result = r.sendResp
 	case protocol.GetTransactionMethodName:
 		result = r.getResp
@@ -292,7 +349,7 @@ func (r *fakeRPCRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		if err := json.Unmarshal(raw.Params, &p); err != nil {
 			r.t.Fatalf("decode getLedgerEntries params: %v", err)
 		}
-		result = accountLookupResponse(r.t, p)
+		result = accountLookupResponseAtSeq(r.t, p, r.loadSeq)
 	default:
 		r.t.Fatalf("unexpected rpc method %q", raw.Method)
 	}
@@ -305,6 +362,27 @@ func (r *fakeRPCRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		r.t.Fatalf("encode rpc resp: %v", err)
+	}
+}
+
+// assertSubmittedSeq decodes the envelope handed to sendTransaction and
+// fails the surrounding test unless tx.SeqNum == r.loadSeq+1. This is the
+// hermetic regression seam for W§3.A.1: pre-fix, resolveSource handed the
+// raw on-chain seq through to the signed envelope and every Soroban write
+// hit TxBadSeq on submit.
+func (r *fakeRPCRouter) assertSubmittedSeq(envB64 string) {
+	r.t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(envB64)
+	if err != nil {
+		r.t.Fatalf("sendTransaction: base64 decode envelope: %v", err)
+	}
+	var env xdr.TransactionEnvelope
+	if err := env.UnmarshalBinary(raw); err != nil {
+		r.t.Fatalf("sendTransaction: unmarshal envelope: %v", err)
+	}
+	want := r.loadSeq + 1
+	if got := env.SeqNum(); got != want {
+		r.t.Fatalf("submitted tx.SeqNum = %d, want %d (loadSeq+1) — Soroban-write TxBadSeq regression (W§3.A.1)", got, want)
 	}
 }
 

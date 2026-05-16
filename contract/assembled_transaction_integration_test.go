@@ -442,3 +442,35 @@ func TestLifecycle_XDRRoundTrip_ThenSignAndSend(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(555), got)
 }
+
+// ---------------------------------------------------------------------------
+// W§3.A.1 hermetic regression: submitted envelope must carry the same
+// sequence number the SourceAccount was built with. integrationParams uses
+// NewSimpleAccount(addr, 42), so the post-simulate signed envelope must
+// also be seq=42 (buildTx uses IncrementSequenceNum: false on both passes,
+// per the AssembleParams contract). Any future drift in build/sign that
+// double-bumps or drops the seq fails this test before reaching real RPC.
+// ---------------------------------------------------------------------------
+
+func TestLifecycle_WriteCall_SubmitsConfiguredSeq(t *testing.T) {
+	_, authB64 := cannedAuthEntry(t)
+	rpc := &fakeSimulator{
+		t:           t,
+		wantSendSeq: 42, // matches integrationParams' NewSimpleAccount(addr, 42)
+		resp:        simResponseWriteCall(t, scValU64(1), []string{authB64}),
+		sendResp: protocol.SendTransactionResponse{
+			Status: stellarcore.TXStatusPending,
+			Hash:   strings.Repeat("ad", 32),
+		},
+	}
+	params, srcKP := integrationParams(t, rpc)
+	at, err := NewAssembledTransaction(params)
+	require.NoError(t, err)
+	require.NoError(t, at.Simulate(context.Background()))
+
+	sent, err := at.SignAndSend(context.Background(), newRecordingSigner(t, srcKP.Address()))
+	require.NoError(t, err)
+	require.NotNil(t, sent)
+	// The seq assertion fires inside fakeSimulator.SendTransaction; reaching
+	// this line means tx.SeqNum was exactly 42 as expected.
+}
