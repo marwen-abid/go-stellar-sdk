@@ -359,6 +359,14 @@ func (c *Client) Invoke(
 // the strkey sourceAddr (WithSource / Source) drives a fresh
 // rpc.LoadAccount fetch so the transaction sees the current sequence number.
 // Returns an InvalidArgs error when neither is set.
+//
+// rpc.LoadAccount returns the on-chain sequence N; the next transaction
+// signed by this account must carry N+1 to satisfy the protocol. The
+// AssembleParams contract requires the source to already carry the sequence
+// the tx will use (buildTx passes IncrementSequenceNum: false on both the
+// initial build and the post-simulate rebuild), so we bump here exactly
+// once. Callers that supply their own account via WithSourceAccount manage
+// their own sequence and are not affected.
 func (c *Client) resolveSource(ctx context.Context, icfg *invokeConfig) (txnbuild.Account, error) {
 	if icfg.sourceAcct != nil {
 		return icfg.sourceAcct, nil
@@ -367,6 +375,9 @@ func (c *Client) resolveSource(ctx context.Context, icfg *invokeConfig) (txnbuil
 		acct, err := c.RPC.LoadAccount(ctx, icfg.sourceAddr)
 		if err != nil {
 			return nil, &Error{Kind: KindSimulationFailed, Details: "Invoke: load source account", cause: err}
+		}
+		if _, err := acct.IncrementSequenceNumber(); err != nil {
+			return nil, &Error{Kind: KindSimulationFailed, Details: "Invoke: increment source sequence", cause: err}
 		}
 		return acct, nil
 	}

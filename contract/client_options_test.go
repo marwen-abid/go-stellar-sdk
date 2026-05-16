@@ -50,7 +50,34 @@ func TestWithSource_FetchesAccountAtInvoke(t *testing.T) {
 
 	seq, err := at.source.GetSequenceNumber()
 	require.NoError(t, err)
-	assert.Equal(t, int64(42), seq, "AT must carry the live sequence number")
+	assert.Equal(t, int64(43), seq, "AT must carry on-chain seq + 1 (resolveSource bumps once after LoadAccount)")
+}
+
+// TestWithSource_BuiltTxCarriesIncrementedSeq is the hermetic regression test
+// for the Soroban-write TxBadSeq bug (wrap-up plan W§3.A.1). Pre-fix,
+// resolveSource returned the on-chain sequence verbatim and AssembledTransaction
+// reused it, so every Soroban write hit TxBadSeq on submit. Post-fix the
+// built envelope must carry on-chain seq + 1.
+func TestWithSource_BuiltTxCarriesIncrementedSeq(t *testing.T) {
+	cid := testContractID(t)
+	addr := keypair.MustRandom().Address()
+	const onChain int64 = 100
+	live := txnbuild.NewSimpleAccount(addr, onChain)
+
+	rpc := cannedInvokeRPC(t)
+	rpc.loadAcctResp = &live
+
+	c := New(cid, rpc, network.TestNetworkPassphrase,
+		WithSpec(buildBumpSpec(t)),
+		WithSource(addr),
+	)
+	at, err := c.Invoke(context.Background(), "bump", map[string]any{"amount": uint32(1)})
+	require.NoError(t, err)
+	require.NotNil(t, at)
+	require.NotNil(t, at.Built)
+
+	assert.Equal(t, onChain+1, at.Built.SequenceNumber(),
+		"built tx must carry on-chain seq + 1 to avoid TxBadSeq")
 }
 
 func TestWithSource_LoadAccountErrorSurfaces(t *testing.T) {
