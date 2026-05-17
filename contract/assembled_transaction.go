@@ -480,6 +480,16 @@ func (a *AssembledTransaction) runAutoRestore(ctx context.Context) error {
 		return err
 	}
 
+	// The restore tx consumed the source's current sequence number on-chain
+	// (BuildRestoreTransaction uses IncrementSequenceNum:false against
+	// a.source, same as buildTx). Advance a.source so the follow-up
+	// re-simulate / SignAndSend of the original invocation picks up the
+	// next sequence number; otherwise the invoke tx would reuse the
+	// restore tx's seq and fail txBadSeq on submit.
+	if _, err := a.source.IncrementSequenceNumber(); err != nil {
+		return &Error{Kind: KindSubmissionFailed, Details: "auto-restore: increment source sequence", cause: err}
+	}
+
 	// Restore consumed the preamble; clear it so the re-simulate path
 	// doesn't trip the "no preamble" branch in BuildRestoreTransaction if
 	// the caller re-enters this code path.

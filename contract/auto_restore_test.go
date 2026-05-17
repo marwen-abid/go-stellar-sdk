@@ -165,6 +165,27 @@ func TestSimulate_AutoRestore_SendFailureWrapped(t *testing.T) {
 	assert.Equal(t, 0, sim.getCall)
 }
 
+// TestSimulate_AutoRestore_AdvancesSourceSequence is a hermetic regression for
+// the restore→invoke seq-reuse bug analogous to W§3.A.1: BuildRestoreTransaction
+// and buildTx both use IncrementSequenceNum:false against a.source, so without
+// the post-restore bump the rebuilt invoke tx would reuse the restore tx's
+// sequence number and fail txBadSeq on submit. newAssembleParams seeds the
+// source at seq 42; the restore tx must go out at 42 and the post-re-simulate
+// Built (the future invoke envelope) must carry 43.
+func TestSimulate_AutoRestore_AdvancesSourceSequence(t *testing.T) {
+	sim, _ := happyPathSim(t)
+	at := newATForAutoRestore(t, sim, KeypairSigner(keypair.MustRandom()), true)
+
+	require.NoError(t, at.Simulate(context.Background()))
+
+	got, err := at.source.GetSequenceNumber()
+	require.NoError(t, err)
+	assert.Equal(t, int64(43), got, "source seq must advance past the restore tx")
+
+	builtSeq := at.Built.ToXDR().SeqNum()
+	assert.Equal(t, int64(43), builtSeq, "rebuilt invoke tx must carry seq=43, not the restore tx's 42")
+}
+
 func TestSimulate_AutoRestore_LoopSentinel(t *testing.T) {
 	_, preamble := cannedRestorePreamble(t)
 	sim := &autoRestoreSim{
