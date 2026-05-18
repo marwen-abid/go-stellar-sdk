@@ -97,13 +97,60 @@ jobs:
         done
         echo "Friendbot never became reachable" >&2
         exit 1
-    - name: Run sandbox-gated tests
-      # The 4 -skip'd tests exercise the native-XLM SAC via Soroban
-      # `transfer`/`balance` invocations. A fresh stellar/quickstart container
-      # does not auto-wrap the native SAC at boot, so these fail with
-      # `simulation_failed: HostError: Error(Context, InternalError)` until a
-      # one-time wrap is performed. Tracked as a follow-up; the remainder of
-      # the sandbox-gated suite runs end-to-end against quickstart.
+    # Install the stellar CLI so the wrap step below can invoke
+    # `contract asset deploy --asset native`. Pin to a release matching the
+    # quickstart PROTOCOL_VERSION above so CLI-side simulation doesn't trip
+    # on config-setting drift between the CLI's bundled host and core.
+    - name: Install stellar CLI
       run: |
-        go test ./... -count=1 -timeout 15m \
-          -skip '^(TestSandbox_Token_TransferLifecycle|TestSandbox_Token_BalanceReadOnly|TestSandbox_Token_TransferThenBalance|TestSandbox_Lifecycle_SACTransfer)$'
+        set -euxo pipefail
+        STELLAR_CLI_VERSION="23.0.0"
+        curl -fsSL -o /tmp/stellar-cli.tar.gz \
+          "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+        mkdir -p "$HOME/.local/bin"
+        tar -xzf /tmp/stellar-cli.tar.gz -C "$HOME/.local/bin"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        "$HOME/.local/bin/stellar" --version
+    # Wrap the native XLM asset into its Stellar Asset Contract on the
+    # sandbox so tests that invoke the native SAC's `transfer` / `balance`
+    # host functions (the 4 tests previously listed in -skip) find the
+    # contract instance in ledger storage. Without this step those tests
+    # fail simulation with HostError: Error(Context, InternalError) /
+    # MissingValue because the native SAC is only auto-instantiated on
+    # networks where someone has previously paid to wrap it — quickstart
+    # starts blank. The contract ID is derived deterministically from the
+    # asset descriptor + network passphrase, so the SDK side (asset.Token
+    # over xdr.MustNewNativeAsset()) finds it without any env var. Re-runs
+    # are idempotent: a subsequent `asset deploy --asset native` against an
+    # already-wrapped native SAC returns the same ID; tolerate non-zero
+    # exit and grep for the "already" / "exists" signal the CLI prints.
+    - name: Wrap native XLM SAC on sandbox
+      env:
+        RPC_URL: "http://localhost:8000/soroban/rpc"
+        NETWORK_PASSPHRASE: "Standalone Network ; February 2017"
+      run: |
+        set -euxo pipefail
+        IDENTITY="sac_deployer"
+        if ! stellar keys public-key "$IDENTITY" >/dev/null 2>&1; then
+          stellar keys generate "$IDENTITY" \
+            --rpc-url "$RPC_URL" \
+            --network-passphrase "$NETWORK_PASSPHRASE"
+        fi
+        if ! stellar keys fund "$IDENTITY" \
+            --rpc-url "$RPC_URL" \
+            --network-passphrase "$NETWORK_PASSPHRASE" 2>&1 | tee /tmp/sac-fund.log; then
+          grep -qi "already" /tmp/sac-fund.log
+        fi
+        stellar contract asset deploy \
+          --asset native \
+          --source-account "$IDENTITY" \
+          --rpc-url "$RPC_URL" \
+          --network-passphrase "$NETWORK_PASSPHRASE" 2>&1 | tee /tmp/sac-deploy.log \
+          || grep -qiE "already|exists" /tmp/sac-deploy.log
+    - name: Run sandbox-gated tests
+      # The 4 native-SAC tests (TestSandbox_Token_TransferLifecycle,
+      # TestSandbox_Token_BalanceReadOnly, TestSandbox_Token_TransferThenBalance,
+      # TestSandbox_Lifecycle_SACTransfer) are now unblocked by the
+      # wrap-native-SAC step above.
+      run: |
+        go test ./... -count=1 -timeout 15m
