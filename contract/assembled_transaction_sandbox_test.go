@@ -82,9 +82,16 @@ func TestSandbox_Lifecycle_SACTransfer(t *testing.T) {
 	}
 
 	// Fetch the live source account so Simulate has an accurate sequence.
+	// LoadAccount returns the current on-chain sequence N; AssembleParams
+	// requires the source to already carry the sequence the next tx will
+	// use (N+1), so we bump here exactly once. This mirrors what
+	// Client.Invoke does in resolveSource.
 	srcAcct, err := sb.RPC.LoadAccount(ctx, fromKP.Address())
 	if err != nil {
 		t.Fatalf("LoadAccount: %v", err)
+	}
+	if _, err := srcAcct.IncrementSequenceNumber(); err != nil {
+		t.Fatalf("IncrementSequenceNumber: %v", err)
 	}
 
 	op := &txnbuild.InvokeHostFunction{

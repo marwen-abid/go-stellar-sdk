@@ -152,17 +152,9 @@ jobs:
           --network-passphrase "$NETWORK_PASSPHRASE" 2>&1 | tee /tmp/sac-deploy.log \
           || grep -qiE "already|exists" /tmp/sac-deploy.log
     - name: Run sandbox-gated tests
-      # The wrap-native-SAC step above unblocks the 3 asset-package native-SAC
+      # The wrap-native-SAC step above unblocks all 4 native-SAC sandbox
       # tests (TestSandbox_Token_TransferLifecycle,
-      # TestSandbox_Token_BalanceReadOnly, TestSandbox_Token_TransferThenBalance).
-      #
-      # TestSandbox_Lifecycle_SACTransfer remains in -skip: simulation
-      # succeeds against the wrapped native SAC but SendTransaction comes
-      # back with TXStatusError (envelope rejected by core). Same submission
-      # works through the higher-level asset.Token.Transfer path, so this
-      # appears to be a pre-existing issue in the raw-InvokeHostFunction
-      # lifecycle test rather than a wrap-step problem. Tracked as a
-      # follow-up.
+      # TestSandbox_Token_BalanceReadOnly, TestSandbox_Token_TransferThenBalance,
+      # and TestSandbox_Lifecycle_SACTransfer).
       run: |
-        go test ./... -count=1 -timeout 15m \
-          -skip '^TestSandbox_Lifecycle_SACTransfer$'
+        go test ./... -count=1 -timeout 15m
